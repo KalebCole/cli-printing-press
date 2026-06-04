@@ -34,6 +34,6 @@ func TestFeedbackPath_UsesLocalShareDir(t *testing.T) {
 	skillContent, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
 	require.Contains(t, string(skillContent),
-		"Entries are stored locally at `~/.local/share/feedback-path-pp-cli/feedback.jsonl`.",
-		"generated SKILL.md should reference the new local ledger path")
+		"Entries are stored locally as `feedback.jsonl` under the resolved data dir.",
+		"generated SKILL.md should reference the resolved data directory")
 }

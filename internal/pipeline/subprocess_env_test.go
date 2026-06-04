@@ -26,6 +26,7 @@ func TestApplyScopedConfigHomeRewritesHomeVars(t *testing.T) {
 	assertEnv(t, got, "HOME", home)
 	assertEnv(t, got, "XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	assertEnv(t, got, "XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	assertEnv(t, got, "XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	assertEnv(t, got, "USERPROFILE", home)
 	assertEnv(t, got, "APPDATA", filepath.Join(home, ".config"))
 	assertEnv(t, got, "UNRELATED", "keepme")
@@ -58,7 +59,7 @@ func TestNewScopedConfigHomeCreatesXDGSubdirs(t *testing.T) {
 	}
 	defer cleanup()
 
-	for _, sub := range []string{".config", ".cache", filepath.Join(".local", "share")} {
+	for _, sub := range []string{".config", ".cache", filepath.Join(".local", "share"), filepath.Join(".local", "state")} {
 		path := filepath.Join(home, sub)
 		info, err := os.Stat(path)
 		if err != nil {
@@ -134,6 +135,38 @@ func TestSubprocessEnvPreservesAPICredentialsAfterScopedHome(t *testing.T) {
 	env := subprocessEnv()
 	assertEnv(t, env, "FOO_API_TOKEN", "secret-token")
 	assertEnv(t, env, "BAR_API_KEY", "secret-key")
+}
+
+func TestSubprocessEnvScrubsScopedCLIRelocationVars(t *testing.T) {
+	poisoned := t.TempDir()
+	t.Setenv("PRINTING_PRESS_RICH_HOME", filepath.Join(poisoned, "home"))
+	t.Setenv("PRINTING_PRESS_RICH_CONFIG_DIR", filepath.Join(poisoned, "config"))
+	t.Setenv("PRINTING_PRESS_RICH_DATA_DIR", filepath.Join(poisoned, "data"))
+	t.Setenv("PRINTING_PRESS_RICH_STATE_DIR", filepath.Join(poisoned, "state"))
+	t.Setenv("PRINTING_PRESS_RICH_CACHE_DIR", filepath.Join(poisoned, "cache"))
+	t.Setenv("PRINTING_PRESS_RICH_API_TOKEN", "secret-token")
+
+	cleanup, err := scopeSubprocessHome("printing-press-rich-pp-cli")
+	if err != nil {
+		t.Fatalf("scopeSubprocessHome: %v", err)
+	}
+	defer cleanup()
+	home := currentSubprocessHome()
+
+	env := subprocessEnv()
+	for _, name := range []string{
+		"PRINTING_PRESS_RICH_HOME",
+		"PRINTING_PRESS_RICH_CONFIG_DIR",
+		"PRINTING_PRESS_RICH_DATA_DIR",
+		"PRINTING_PRESS_RICH_STATE_DIR",
+		"PRINTING_PRESS_RICH_CACHE_DIR",
+	} {
+		if envValue(env, name) != "" {
+			t.Fatalf("%s leaked into scoped subprocess env: %v", name, env)
+		}
+	}
+	assertEnv(t, env, "PRINTING_PRESS_RICH_API_TOKEN", "secret-token")
+	assertEnv(t, env, "XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 }
 
 func TestApplyDefaultSubprocessEnvDogfoodAppendPreservesAPICredential(t *testing.T) {
@@ -280,4 +313,14 @@ func containsEnv(env []string, name, want string) bool {
 		}
 	}
 	return false
+}
+
+func envValue(env []string, name string) string {
+	prefix := name + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return ""
 }

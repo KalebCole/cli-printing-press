@@ -251,7 +251,7 @@ func (s *openAPISpec) IsSynthetic() bool {
 }
 
 func RunDogfood(dir, specPath string, opts ...DogfoodOption) (*DogfoodReport, error) {
-	releaseHome, err := scopeSubprocessHome()
+	releaseHome, err := scopeSubprocessHome(findCLIName(dir))
 	if err != nil {
 		return nil, err
 	}
