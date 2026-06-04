@@ -1859,6 +1859,8 @@ func (g *Generator) renderSingleFiles() error {
 		"cliutil_probe.go.tmpl":                    filepath.Join("internal", "cliutil", "probe.go"),
 		"cliutil_ratelimit.go.tmpl":                filepath.Join("internal", "cliutil", "ratelimit.go"),
 		"cliutil_verifyenv.go.tmpl":                filepath.Join("internal", "cliutil", "verifyenv.go"),
+		"cliutil_paths.go.tmpl":                    filepath.Join("internal", "cliutil", "paths.go"),
+		"cliutil_paths_test.go.tmpl":               filepath.Join("internal", "cliutil", "paths_test.go"),
 		"cliutil_extractnumber.go.tmpl":            filepath.Join("internal", "cliutil", "extractnumber.go"),
 		"cliutil_extractnumber_test.go.tmpl":       filepath.Join("internal", "cliutil", "extractnumber_test.go"),
 		"cliutil_jwtshape.go.tmpl":                 filepath.Join("internal", "cliutil", "jwtshape.go"),
@@ -1954,6 +1956,19 @@ func generatedTypesFileHasDeclarations(content string) bool {
 }
 
 func (g *Generator) renderOptionalSupportFiles() error {
+	if g.shouldEmitAuth() {
+		authData := &configTemplateData{
+			APISpec:        g.Spec,
+			HasAuthCommand: true,
+		}
+		if err := g.renderTemplate("cliutil_credentials.go.tmpl", filepath.Join("internal", "cliutil", "credentials.go"), authData); err != nil {
+			return fmt.Errorf("rendering cliutil credentials: %w", err)
+		}
+		if err := g.renderTemplate("cliutil_credentials_test.go.tmpl", filepath.Join("internal", "cliutil", "credentials_test.go"), authData); err != nil {
+			return fmt.Errorf("rendering cliutil credentials test: %w", err)
+		}
+	}
+
 	if g.Spec.HasHTMLExtraction() {
 		if err := g.renderTemplate("html_extract.go.tmpl", filepath.Join("internal", "cli", "html_extract.go"), g.Spec); err != nil {
 			return fmt.Errorf("rendering HTML extraction helper: %w", err)
@@ -2432,6 +2447,8 @@ func (g *Generator) GenerateMCPSurface() error {
 		"cliutil_probe.go.tmpl":              filepath.Join("internal", "cliutil", "probe.go"),
 		"cliutil_ratelimit.go.tmpl":          filepath.Join("internal", "cliutil", "ratelimit.go"),
 		"cliutil_verifyenv.go.tmpl":          filepath.Join("internal", "cliutil", "verifyenv.go"),
+		"cliutil_paths.go.tmpl":              filepath.Join("internal", "cliutil", "paths.go"),
+		"cliutil_paths_test.go.tmpl":         filepath.Join("internal", "cliutil", "paths_test.go"),
 		"cliutil_extractnumber.go.tmpl":      filepath.Join("internal", "cliutil", "extractnumber.go"),
 		"cliutil_extractnumber_test.go.tmpl": filepath.Join("internal", "cliutil", "extractnumber_test.go"),
 		"cliutil_jwtshape.go.tmpl":           filepath.Join("internal", "cliutil", "jwtshape.go"),

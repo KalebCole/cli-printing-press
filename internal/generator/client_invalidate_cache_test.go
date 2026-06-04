@@ -93,12 +93,11 @@ func TestGenerateCacheDirIsHTTPSubdir(t *testing.T) {
 	require.NoError(t, err)
 	clientGo := string(clientGoBytes)
 
-	cliName := naming.CLI(apiSpec.Name)
-	wantSubdir := `filepath.Join(homeDir, ".cache", "` + cliName + `", "http")`
-	wantOldShape := `filepath.Join(homeDir, ".cache", "` + cliName + `")`
-
-	assert.Contains(t, clientGo, wantSubdir,
+	assert.Contains(t, clientGo, `dir, err := cliutil.CacheDir()`,
+		"client.go must route the cache root through the generated cache-dir resolver")
+	assert.Contains(t, clientGo, `cacheDir = filepath.Join(dir, "http")`,
 		"client.go must place cacheDir under <api>/http so invalidateCache spares siblings (#1126)")
+	wantOldShape := `filepath.Join(homeDir, ".cache", "` + naming.CLI(apiSpec.Name) + `")`
 	assert.NotContains(t, clientGo, wantOldShape,
 		"client.go must not point cacheDir at the bare ~/.cache/<api>/ root (#1126)")
 }

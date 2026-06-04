@@ -64,6 +64,8 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		"internal/cliutil/probe.go",
 		"internal/cliutil/ratelimit.go",
 		"internal/cliutil/verifyenv.go",
+		"internal/cliutil/paths.go",
+		"internal/cliutil/paths_test.go",
 		"internal/cliutil/extractnumber.go",
 		"internal/cliutil/extractnumber_test.go",
 		"internal/cliutil/jwtshape.go",
@@ -96,9 +98,9 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		// Bump it AND add to mustInclude above when adding always-emitted
 		// templates. Per-spec dynamic files (per-resource command files,
 		// generated tests) account for the difference between fixtures.
-		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 71},
-		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 76},
-		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 73},
+		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 75},
+		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 80},
+		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 77},
 	}
 
 	for _, tt := range tests {
@@ -2513,11 +2515,10 @@ func TestGenerateCookieAuthEmitsSetTokenSubcommand(t *testing.T) {
 }
 
 // TestGenerateNoAuthPersistedQueryOmitsSetToken verifies that the
-// auth_browser template does NOT emit set-token (or import cliutil) when
+// auth_browser template does NOT emit set-token when
 // Auth.Type == "none" + a graphql_persisted_query hint routes the spec
 // through auth_browser purely for the query-refresh flow. Saving a token
-// has no meaning when there are no credentials to save; emitting the
-// subcommand would also produce an unused cliutil import and break build.
+// has no meaning when there are no credentials to save.
 func TestGenerateNoAuthPersistedQueryOmitsSetToken(t *testing.T) {
 	t.Parallel()
 
@@ -2538,8 +2539,8 @@ func TestGenerateNoAuthPersistedQueryOmitsSetToken(t *testing.T) {
 		"auth.type=none should not emit a set-token subcommand")
 	assert.NotContains(t, authGo, "cliutil.LooksLikeJWT",
 		"auth.type=none should not reference the JWT-shape helper")
-	assert.NotContains(t, authGo, "internal/cliutil\"",
-		"auth.type=none must not import cliutil — would trigger unused-import")
+	assert.Contains(t, authGo, "cliutil.StateDir",
+		"auth.type=none persisted-query refresh still uses cliutil for the state-dir registry path")
 }
 
 func TestGenerateCookieHTMLDefaultsBrowserChromeTransport(t *testing.T) {

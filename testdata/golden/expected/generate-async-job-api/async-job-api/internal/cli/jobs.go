@@ -17,10 +17,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"async-job-pp-cli/internal/client"
+	"async-job-pp-cli/internal/cliutil"
 )
 
 // JobRow is one entry in the local jobs ledger. Rows are appended as NDJSON
-// to ~/.async-job-pp-cli/jobs.jsonl; the latest row for a given JobID wins
+// to the CLI state directory; the latest row for a given JobID wins
 // when listing. Pruning rewrites the file without old entries.
 type JobRow struct {
 	JobID          string    `json:"job_id"`
@@ -35,14 +36,22 @@ type JobRow struct {
 }
 
 func jobsFilePath() (string, error) {
+	dir, err := cliutil.StateDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating jobs state dir: %w", err)
+	}
+	return filepath.Join(dir, "jobs.jsonl"), nil
+}
+
+func legacyJobsFilePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home dir: %w", err)
 	}
 	dir := filepath.Join(home, ".async-job-pp-cli")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("creating state dir: %w", err)
-	}
 	return filepath.Join(dir, "jobs.jsonl"), nil
 }
 
@@ -72,9 +81,19 @@ func readJobRows() ([]JobRow, error) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			if legacy, legacyErr := legacyJobsFilePath(); legacyErr == nil && legacy != p {
+				if data, err = os.ReadFile(legacy); err != nil {
+					if os.IsNotExist(err) {
+						return nil, nil
+					}
+					return nil, fmt.Errorf("reading legacy jobs ledger: %w", err)
+				}
+			} else {
+				return nil, nil
+			}
+		} else {
+			return nil, fmt.Errorf("reading jobs ledger: %w", err)
 		}
-		return nil, fmt.Errorf("reading jobs ledger: %w", err)
 	}
 	var rows []JobRow
 	for _, line := range strings.Split(string(data), "\n") {
@@ -217,7 +236,7 @@ func newJobsCmd(flags *rootFlags) *cobra.Command {
 		Use:   "jobs",
 		Short: "List and inspect async jobs tracked by this CLI",
 		Long: `Jobs tracked when you submit an async-capable endpoint land in
-~/.async-job-pp-cli/jobs.jsonl. This command lists, inspects, and prunes them.
+the CLI state directory's jobs.jsonl. This command lists, inspects, and prunes them.
 
 Submit an async endpoint with --wait to block until completion; submit
 without --wait to get the job ID back immediately and track it later.`,

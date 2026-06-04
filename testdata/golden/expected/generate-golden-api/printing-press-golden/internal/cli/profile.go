@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"printing-press-golden-pp-cli/internal/cliutil"
 )
 
 // Profile is a named set of flag values saved for reuse across invocations.
@@ -29,14 +30,22 @@ type profileStore struct {
 }
 
 func profileStorePath() (string, error) {
+	dir, err := cliutil.ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating profile config dir: %w", err)
+	}
+	return filepath.Join(dir, "profiles.json"), nil
+}
+
+func legacyProfileStorePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home dir: %w", err)
 	}
 	dir := filepath.Join(home, ".printing-press-golden-pp-cli")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("creating state dir: %w", err)
-	}
 	return filepath.Join(dir, "profiles.json"), nil
 }
 
@@ -48,10 +57,16 @@ func loadProfileStore() (*profileStore, error) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if legacy, legacyErr := legacyProfileStorePath(); legacyErr == nil && legacy != p {
+				if data, err = os.ReadFile(legacy); err == nil {
+					goto parse
+				}
+			}
 			return &profileStore{Profiles: map[string]Profile{}}, nil
 		}
 		return nil, fmt.Errorf("reading profiles: %w", err)
 	}
+parse:
 	var s profileStore
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parsing profiles: %w", err)
@@ -100,7 +115,7 @@ func ApplyProfileToFlags(cmd *cobra.Command, profile *Profile) error {
 	// Reserved flags that never come from a profile - they control profile
 	// resolution itself or are dangerous to overlay.
 	reserved := map[string]bool{
-		"profile": true, "config": true, "help": true,
+		"profile": true, "config": true, "home": true, "help": true,
 	}
 	for name, value := range profile.Values {
 		if reserved[name] {

@@ -11,11 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"{{modulePath}}/internal/cliutil"
 )
 
-// teachLogStateDirName is the per-user state directory under
-// $HOME/.local/share. Stamped at generate time from the CLI name so
-// each printed CLI gets its own log directory.
+// teachLogStateDirName is the per-user state directory name.
 const teachLogStateDirName = "{{kebab .Name}}-pp-cli"
 
 // teachLogFileName is the on-disk log name. Shared with any plain-text
@@ -40,14 +40,22 @@ type TeachLogEntry struct {
 // TeachLogPath returns the on-disk path to the structured teach log.
 // Creates the parent directory on first call (mode 0o700).
 func TeachLogPath() (string, error) {
+	dir, err := cliutil.StateDir()
+	if err != nil {
+		return "", fmt.Errorf("teach log: resolve state dir: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("teach log: mkdir %s: %w", dir, err)
+	}
+	return filepath.Join(dir, teachLogFileName), nil
+}
+
+func legacyTeachLogPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("teach log: resolve home: %w", err)
 	}
 	dir := filepath.Join(home, ".local", "share", teachLogStateDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("teach log: mkdir %s: %w", dir, err)
-	}
 	return filepath.Join(dir, teachLogFileName), nil
 }
 
@@ -102,9 +110,20 @@ func ReadTeachLogWarnings(resourceIDs ...string) ([]TeachLogEntry, error) {
 	f, err := os.Open(p) // #nosec G304 -- path is per-user state under $HOME.
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			legacy, legacyErr := legacyTeachLogPath()
+			if legacyErr != nil || legacy == p {
+				return nil, nil
+			}
+			f, err = os.Open(legacy) // #nosec G304 -- legacy path is per-user data under $HOME.
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil, nil
+				}
+				return nil, fmt.Errorf("teach log: open %s: %w", legacy, err)
+			}
+		} else {
+			return nil, fmt.Errorf("teach log: open %s: %w", p, err)
 		}
-		return nil, fmt.Errorf("teach log: open %s: %w", p, err)
 	}
 	defer f.Close()
 

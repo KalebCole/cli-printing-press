@@ -53,7 +53,7 @@ import (
 {{- if or .Auth.RequiresBrowserSession .Auth.HasCookies}}
 	"{{modulePath}}/internal/client"
 {{- end}}
-{{- if not (eq .Auth.Type "none")}}
+{{- if or (not (eq .Auth.Type "none")) $hasQueryRefresh}}
 	"{{modulePath}}/internal/cliutil"
 {{- end}}
 	"{{modulePath}}/internal/config"
@@ -995,7 +995,10 @@ func newAuthRefreshQueriesCmd(flags *rootFlags) *cobra.Command {
 				return authErr(fmt.Errorf("no persisted GraphQL queries captured; exercise the target site and try again"))
 			}
 
-			path := persistedQueryRegistryPath(cfg, outputPath)
+			path, err := persistedQueryRegistryPath(outputPath)
+			if err != nil {
+				return usageErr(err)
+			}
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				return configErr(fmt.Errorf("creating query registry directory: %w", err))
 			}
@@ -1013,19 +1016,44 @@ func newAuthRefreshQueriesCmd(flags *rootFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().DurationVar(&duration, "duration", 30*time.Second, "How long to capture browser GraphQL traffic")
-	cmd.Flags().StringVar(&outputPath, "output", "", "Path for persisted query registry JSON (default: beside the CLI config)")
+	cmd.Flags().StringVar(&outputPath, "output", "", "Absolute path for persisted query registry JSON (default: state directory)")
 	return cmd
 }
 
-func persistedQueryRegistryPath(cfg *config.Config, outputPath string) string {
-	if outputPath != "" {
-		return outputPath
+func persistedQueryRegistryPath(outputPath string) (string, error) {
+	if strings.TrimSpace(outputPath) != "" {
+		clean, ok := cleanOutputPath(outputPath)
+		if !ok {
+			return "", fmt.Errorf("invalid --output path %q: must be absolute", outputPath)
+		}
+		return clean, nil
 	}
-	if cfg == nil || cfg.Path == "" {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".config", "{{.Name}}-pp-cli", "persisted-queries.json")
+	dir, err := cliutil.StateDir()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(filepath.Dir(cfg.Path), "persisted-queries.json")
+	return filepath.Join(dir, "persisted-queries.json"), nil
+}
+
+func cleanOutputPath(raw string) (string, bool) {
+	path := strings.TrimSpace(raw)
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		path = home
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+	}
+	if !filepath.IsAbs(path) {
+		return "", false
+	}
+	return filepath.Clean(path), true
 }
 
 func capturePersistedQueries(capture browserCaptureHandle, duration time.Duration) ([]persistedQueryCapture, error) {
@@ -1788,11 +1816,13 @@ type browserSessionProof struct {
 }
 
 func browserSessionProofPath(cfg *config.Config) string {
-	if cfg == nil || cfg.Path == "" {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".config", "{{.Name}}-pp-cli", "browser-session-proof.json")
+	if dir, err := cliutil.DataDir(); err == nil {
+		return filepath.Join(dir, "browser-session-proof.json")
 	}
-	return filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+	if cfg != nil && cfg.Path != "" {
+		return filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+	}
+	return ""
 }
 
 func clearBrowserSessionProof(cfg *config.Config) error {
@@ -1828,7 +1858,13 @@ func browserSessionProofStatusForAuth(cfg *config.Config, authHeader string) (bo
 	}
 	data, err := os.ReadFile(browserSessionProofPath(cfg))
 	if err != nil {
-		return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
+		if cfg != nil && cfg.Path != "" {
+			legacyPath := filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+			data, err = os.ReadFile(legacyPath)
+		}
+		if err != nil {
+			return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
+		}
 	}
 	var proof browserSessionProof
 	if err := json.Unmarshal(data, &proof); err != nil {

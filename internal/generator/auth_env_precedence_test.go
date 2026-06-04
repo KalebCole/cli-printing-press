@@ -1242,6 +1242,26 @@ func TestCatalogAuthEnvVars_GenerateUnchangedWithoutCatalogList(t *testing.T) {
 	assert.NotContains(t, content, "STRIPE_SECRET_KEY")
 }
 
+func TestAuthNoneDoesNotEmitCredentialsScaffolding(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("auth-none-paths")
+	apiSpec.Auth = spec.AuthConfig{Type: "none"}
+
+	outputDir := filepath.Join(t.TempDir(), "auth-none-paths-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	if _, err := os.Stat(filepath.Join(outputDir, "internal", "cliutil", "credentials.go")); !os.IsNotExist(err) {
+		t.Fatalf("credentials.go stat error = %v, want no credentials scaffolding", err)
+	}
+	configSrc := readGeneratedFile(t, outputDir, "internal", "config", "config.go")
+	require.NotContains(t, configSrc, "LoadCredentials")
+	require.NotContains(t, configSrc, "SaveCredentials")
+	require.NotContains(t, configSrc, "RemoveCredentials")
+
+	requireGeneratedCompiles(t, outputDir)
+}
+
 // authHeaderBody slices out just the AuthHeader function body so precedence
 // assertions can't be tricked by a matching pattern in unrelated code
 // further down the file.

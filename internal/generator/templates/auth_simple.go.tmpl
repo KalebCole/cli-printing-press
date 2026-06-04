@@ -47,9 +47,9 @@ func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := cmd.OutOrStdout()
 {{- if .Auth.KeyURL}}
-			fmt.Fprintln(w, "Get a key at: {{.Auth.KeyURL}}")
+			fmt.Fprintln(w, {{printf "%q" (printf "Get a key at: %s" .Auth.KeyURL)}})
 {{- else if .WebsiteURL}}
-			fmt.Fprintln(w, "See API docs: {{.WebsiteURL}}")
+			fmt.Fprintln(w, {{printf "%q" (printf "See API docs: %s" .WebsiteURL)}})
 {{- else}}
 			fmt.Fprintln(w, "No setup URL is configured for this CLI; check the API's docs.")
 {{- end}}
@@ -84,7 +84,7 @@ func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
 				return nil
 			}
 {{- if or .Auth.KeyURL .WebsiteURL}}
-			launchURL := {{if .Auth.KeyURL}}"{{.Auth.KeyURL}}"{{else}}"{{.WebsiteURL}}"{{end}}
+			launchURL := {{if .Auth.KeyURL}}{{printf "%q" .Auth.KeyURL}}{{else}}{{printf "%q" .WebsiteURL}}{{end}}
 			if cliutil.IsVerifyEnv() {
 				fmt.Fprintf(w, "would launch: %s\n", launchURL)
 				return nil

@@ -11,18 +11,21 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+	"printing-press-oauth2-pp-cli/internal/cliutil"
 )
 
 type Config struct {
-	BaseURL       string            `toml:"base_url"`
-	AuthHeaderVal string            `toml:"auth_header"`
-	Headers       map[string]string `toml:"headers,omitempty"`
-	AuthSource    string            `toml:"-"`
-	AccessToken   string            `toml:"access_token"`
-	RefreshToken  string            `toml:"refresh_token"`
-	TokenExpiry   time.Time         `toml:"token_expiry"`
-	ClientID      string            `toml:"client_id"`
-	ClientSecret  string            `toml:"client_secret"`
+	BaseURL            string            `toml:"base_url"`
+	AuthHeaderVal      string            `toml:"auth_header"`
+	Headers            map[string]string `toml:"headers,omitempty"`
+	AuthSource         string            `toml:"-"`
+	CredentialSource   string            `toml:"-"`
+	AgentcookieManaged bool              `toml:"-"`
+	AccessToken        string            `toml:"access_token"`
+	RefreshToken       string            `toml:"refresh_token"`
+	TokenExpiry        time.Time         `toml:"token_expiry"`
+	ClientID           string            `toml:"client_id"`
+	ClientSecret       string            `toml:"client_secret"`
 	// DeviceAuthorizationURL overrides the spec-baked OAuth2 device authorization endpoint.
 	// Falls back to the generator default at the call site when empty so a
 	// user pointing the CLI at a non-default deployment can override without
@@ -41,21 +44,50 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	// Resolve config path
-	path := configPath
-	if path == "" {
-		path = os.Getenv("PRINTING_PRESS_OAUTH2_CONFIG")
-	}
-	if path == "" {
-		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, ".config", "printing-press-oauth2-pp-cli", "config.toml")
+	path, explicitConfigFile, err := resolveConfigPath(configPath)
+	if err != nil {
+		return nil, err
 	}
 	cfg.Path = path
 
 	// Try to load config file
-	data, err := os.ReadFile(path)
-	if err == nil {
-		if err := toml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	loaded := false
+	if err := readConfigFile(path, cfg, "config-kind path"); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	} else {
+		loaded = true
+	}
+	if !loaded && !explicitConfigFile {
+		legacyPath, err := legacyConfigPath()
+		if err != nil {
+			return nil, err
+		}
+		if legacyPath != path {
+			if err := readConfigFile(legacyPath, cfg, "legacy config path"); err != nil {
+				if !os.IsNotExist(err) {
+					return nil, err
+				}
+			}
+		}
+	}
+	cfg.Path = path
+	if cfg.agentcookieManaged() {
+		cfg.AgentcookieManaged = true
+		cfg.CredentialSource = "agentcookie"
+	} else {
+		creds, ok, err := cliutil.LoadCredentials()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			cfg.clearCredentialFields()
+			cfg.applyCredentials(creds)
+			if cfg.hasCredentialFields() {
+				cfg.AuthSource = "config"
+				cfg.CredentialSource = "credentials file"
+			}
 		}
 	}
 
@@ -63,8 +95,8 @@ func Load(configPath string) (*Config, error) {
 	if v := os.Getenv("DEVICE_CODE_CLIENT_ID"); v != "" {
 		cfg.DeviceCodeClientId = v
 		cfg.AuthSource = "env:DEVICE_CODE_CLIENT_ID"
+		cfg.CredentialSource = "env:DEVICE_CODE_CLIENT_ID"
 	}
-
 	// Label config-file-derived credentials so doctor can distinguish
 	// "credentials persisted on disk" from "no credentials at all" — without
 	// this, users who saved via set-token without an env var see a blank
@@ -73,11 +105,11 @@ func Load(configPath string) (*Config, error) {
 	// config file path is exposed separately as report["config_path"], and
 	// embedding it in auth_source leaks the user's home directory through
 	// doctor's JSON envelope.
-	if cfg.AuthSource == "" && (cfg.AuthHeaderVal != "" || cfg.AccessToken != "") {
+	if cfg.AuthSource == "" && cfg.hasCredentialFields() {
 		cfg.AuthSource = "config"
 	}
-	if cfg.AuthSource == "" && cfg.DeviceCodeClientId != "" {
-		cfg.AuthSource = "config"
+	if cfg.CredentialSource == "" && cfg.AuthSource == "config" {
+		cfg.CredentialSource = "legacy config path"
 	}
 
 	// Soft agentcookie integration: if the agentcookie daemon manages this
@@ -92,6 +124,8 @@ func Load(configPath string) (*Config, error) {
 		marker := filepath.Join(filepath.Dir(cfg.Path), ".agentcookie-managed")
 		if _, err := os.Stat(marker); err == nil {
 			cfg.AuthSource = "agentcookie"
+			cfg.CredentialSource = "agentcookie"
+			cfg.AgentcookieManaged = true
 		}
 	}
 
@@ -106,6 +140,39 @@ func Load(configPath string) (*Config, error) {
 		cfg.TokenURL = v
 	}
 	return cfg, nil
+}
+
+func resolveConfigPath(configPath string) (string, bool, error) {
+	if strings.TrimSpace(configPath) != "" {
+		return configPath, true, nil
+	}
+	if path := os.Getenv("PRINTING_PRESS_OAUTH2_CONFIG"); path != "" {
+		return path, true, nil
+	}
+	dir, err := cliutil.ConfigDir()
+	if err != nil {
+		return "", false, err
+	}
+	return filepath.Join(dir, "config.toml"), false, nil
+}
+
+func legacyConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve legacy config path: %w", err)
+	}
+	return filepath.Join(home, ".config", "printing-press-oauth2-pp-cli", "config.toml"), nil
+}
+
+func readConfigFile(path string, cfg *Config, owner string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parsing %s %s: %w", owner, path, err)
+	}
+	return nil
 }
 
 func (c *Config) AuthHeader() string {
@@ -139,12 +206,92 @@ func applyAuthFormat(format string, replacements map[string]string) string {
 	return format
 }
 
+func (c *Config) agentcookieManaged() bool {
+	if c.AgentcookieManaged || c.AuthSource == "agentcookie" || c.CredentialSource == "agentcookie" {
+		return true
+	}
+	if c.Path == "" {
+		return false
+	}
+	marker := filepath.Join(filepath.Dir(c.Path), ".agentcookie-managed")
+	if _, err := os.Stat(marker); err == nil {
+		return true
+	}
+	return false
+}
+
+func (c *Config) hasCredentialFields() bool {
+	if c.AuthHeaderVal != "" ||
+		c.AccessToken != "" ||
+		c.RefreshToken != "" ||
+		!c.TokenExpiry.IsZero() ||
+		c.ClientID != "" ||
+		c.ClientSecret != "" {
+		return true
+	}
+	if c.DeviceCodeClientId != "" {
+		return true
+	}
+	return false
+}
+
+func (c *Config) clearCredentialFields() {
+	c.AuthHeaderVal = ""
+	c.AccessToken = ""
+	c.RefreshToken = ""
+	c.TokenExpiry = time.Time{}
+	c.ClientID = ""
+	c.ClientSecret = ""
+	c.DeviceCodeClientId = ""
+}
+
+func (c *Config) credentials() *cliutil.Credentials {
+	return &cliutil.Credentials{
+		AuthHeaderVal:      c.AuthHeaderVal,
+		AccessToken:        c.AccessToken,
+		RefreshToken:       c.RefreshToken,
+		TokenExpiry:        c.TokenExpiry,
+		ClientID:           c.ClientID,
+		ClientSecret:       c.ClientSecret,
+		DeviceCodeClientId: c.DeviceCodeClientId,
+	}
+}
+
+func (c *Config) applyCredentials(creds *cliutil.Credentials) {
+	if creds == nil {
+		return
+	}
+	c.AuthHeaderVal = creds.AuthHeaderVal
+	c.AccessToken = creds.AccessToken
+	c.RefreshToken = creds.RefreshToken
+	c.TokenExpiry = creds.TokenExpiry
+	c.ClientID = creds.ClientID
+	c.ClientSecret = creds.ClientSecret
+	c.DeviceCodeClientId = creds.DeviceCodeClientId
+}
+
+func (c *Config) saveCredentialsFirst() error {
+	if c.agentcookieManaged() {
+		c.AgentcookieManaged = true
+		c.CredentialSource = "agentcookie"
+		return nil
+	}
+	if err := cliutil.SaveCredentials(c.credentials()); err != nil {
+		return err
+	}
+	c.CredentialSource = "credentials file"
+	return nil
+}
+
 func (c *Config) SaveTokens(clientID, clientSecret, accessToken, refreshToken string, expiry time.Time) error {
 	c.ClientID = clientID
 	c.ClientSecret = clientSecret
 	c.AccessToken = accessToken
 	c.RefreshToken = refreshToken
 	c.TokenExpiry = expiry
+	if err := c.saveCredentialsFirst(); err != nil {
+		return err
+	}
 	return c.save()
 }
 
@@ -162,6 +309,14 @@ func (c *Config) ClearTokens() error {
 	c.ClientID = ""
 	c.ClientSecret = ""
 	c.DeviceCodeClientId = ""
+	if c.agentcookieManaged() {
+		c.AgentcookieManaged = true
+		c.CredentialSource = "agentcookie"
+		return nil
+	}
+	if err := cliutil.RemoveCredentials(); err != nil {
+		return err
+	}
 	return c.save()
 }
 
@@ -170,11 +325,43 @@ func (c *Config) save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
-	data, err := toml.Marshal(c)
+	var persist any = c
+	if !c.agentcookieManaged() {
+		persist = c.persisted()
+	}
+	data, err := toml.Marshal(persist)
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return os.WriteFile(c.Path, data, 0o600)
+	return atomicWriteConfigFile(c.Path, data)
+}
+
+func atomicWriteConfigFile(path string, data []byte) error {
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return fmt.Errorf("writing temporary config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("publishing config: %w", err)
+	}
+	return nil
+}
+
+type persistedConfig struct {
+	BaseURL                string            `toml:"base_url"`
+	Headers                map[string]string `toml:"headers,omitempty"`
+	DeviceAuthorizationURL string            `toml:"device_authorization_url,omitempty"`
+	TokenURL               string            `toml:"token_url,omitempty"`
+}
+
+func (c *Config) persisted() persistedConfig {
+	return persistedConfig{
+		BaseURL:                c.BaseURL,
+		Headers:                c.Headers,
+		DeviceAuthorizationURL: c.DeviceAuthorizationURL,
+		TokenURL:               c.TokenURL,
+	}
 }
 
 // Ensure strings import is used

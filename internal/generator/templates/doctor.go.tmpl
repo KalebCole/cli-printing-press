@@ -293,9 +293,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					report["auth_hint"] = "export {{.Name}}=<your-oauth-refresh-value>"
 {{- end}}
 {{- if .Auth.KeyURL}}
-					report["auth_key_url"] = "{{.Auth.KeyURL}}"
+					report["auth_key_url"] = {{printf "%q" .Auth.KeyURL}}
 {{- else if .WebsiteURL}}
-					report["auth_docs_url"] = "{{.WebsiteURL}}"
+					report["auth_docs_url"] = {{printf "%q" .WebsiteURL}}
 {{- end}}
 {{- if .Auth.Instructions}}
 					report["auth_instructions"] = {{printf "%q" .Auth.Instructions}}
@@ -324,9 +324,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 {{- end}}
 {{- end}}
 {{- if .Auth.KeyURL}}
-					report["auth_key_url"] = "{{.Auth.KeyURL}}"
+					report["auth_key_url"] = {{printf "%q" .Auth.KeyURL}}
 {{- else if .WebsiteURL}}
-					report["auth_docs_url"] = "{{.WebsiteURL}}"
+					report["auth_docs_url"] = {{printf "%q" .WebsiteURL}}
 {{- end}}
 {{- if .Auth.Instructions}}
 					report["auth_instructions"] = {{printf "%q" .Auth.Instructions}}
@@ -901,10 +901,21 @@ func browserSessionProofStatus(cfg *config.Config, authHeader string) (bool, str
 	if authHeader == "" {
 		return false, "no browser session credentials configured"
 	}
-	proofPath := filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+	proofPath := ""
+	if dir, err := cliutil.DataDir(); err == nil {
+		proofPath = filepath.Join(dir, "browser-session-proof.json")
+	} else if cfg.Path != "" {
+		proofPath = filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+	}
 	data, err := os.ReadFile(proofPath)
 	if err != nil {
-		return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
+		if cfg.Path != "" {
+			legacyPath := filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+			data, err = os.ReadFile(legacyPath)
+		}
+		if err != nil {
+			return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
+		}
 	}
 	var proof doctorBrowserSessionProof
 	if err := json.Unmarshal(data, &proof); err != nil {

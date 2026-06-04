@@ -21,6 +21,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 {{- end}}
+	"{{modulePath}}/internal/cliutil"
 )
 
 type Config struct {
@@ -31,6 +32,10 @@ type Config struct {
 	AuthHeaderVal  string `{{configTag .Config.Format}}:"auth_header"`
 	Headers        map[string]string `{{configTag .Config.Format}}:"headers,omitempty"`
 	AuthSource     string `{{configTag .Config.Format}}:"-"`
+{{- if .HasAuthCommand}}
+	CredentialSource string `{{configTag .Config.Format}}:"-"`
+	AgentcookieManaged bool `{{configTag .Config.Format}}:"-"`
+{{- end}}
 {{- if .HasRequiredRoles}}
 	AuthRole       string `{{configTag .Config.Format}}:"auth_role,omitempty"`
 {{- end}}
@@ -103,30 +108,52 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	// Resolve config path
-	path := configPath
-	if path == "" {
-		path = os.Getenv("{{envName .Name}}_CONFIG")
-	}
-	if path == "" {
-		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, ".config", "{{.Name}}-pp-cli", "config.{{or .Config.Format "json"}}")
+	path, explicitConfigFile, err := resolveConfigPath(configPath)
+	if err != nil {
+		return nil, err
 	}
 	cfg.Path = path
 
 	// Try to load config file
-{{- if eq .Config.Format "toml"}}
-	data, err := os.ReadFile(path)
-	if err == nil {
-		if err := toml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	loaded := false
+	if err := readConfigFile(path, cfg, "config-kind path"); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	} else {
+		loaded = true
+	}
+	if !loaded && !explicitConfigFile {
+		legacyPath, err := legacyConfigPath()
+		if err != nil {
+			return nil, err
+		}
+		if legacyPath != path {
+			if err := readConfigFile(legacyPath, cfg, "legacy config path"); err != nil {
+				if !os.IsNotExist(err) {
+					return nil, err
+				}
+			}
 		}
 	}
-{{- else}}
-	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	cfg.Path = path
+{{- if .HasAuthCommand}}
+	if cfg.agentcookieManaged() {
+		cfg.AgentcookieManaged = true
+		cfg.CredentialSource = "agentcookie"
+	} else {
+		creds, ok, err := cliutil.LoadCredentials()
+		if err != nil {
+			return nil, err
 		}
-		cfg.Path = path
+		if ok {
+			cfg.clearCredentialFields()
+			cfg.applyCredentials(creds)
+			if cfg.hasCredentialFields() {
+				cfg.AuthSource = "config"
+				cfg.CredentialSource = "credentials file"
+			}
+		}
 	}
 {{- end}}
 
@@ -139,6 +166,9 @@ func Load(configPath string) (*Config, error) {
 	if v := os.Getenv("{{.Name}}"); v != "" {
 		cfg.{{resolveEnvVarField .Name}} = v
 		cfg.AuthSource = "env:{{.Name}}"
+{{- if $.HasAuthCommand}}
+		cfg.CredentialSource = "env:{{.Name}}"
+{{- end}}
 	}
 {{- end}}
 {{- else if .Auth.EnvVars}}
@@ -147,6 +177,9 @@ func Load(configPath string) (*Config, error) {
 	if v := os.Getenv("{{.}}"); v != "" {
 		cfg.{{resolveEnvVarField .}} = v
 		cfg.AuthSource = "env:{{.}}"
+{{- if $.HasAuthCommand}}
+		cfg.CredentialSource = "env:{{.}}"
+{{- end}}
 	}
 {{- end}}
 {{- end}}
@@ -159,6 +192,7 @@ func Load(configPath string) (*Config, error) {
 	}
 {{- end}}
 
+{{- if .HasAuthCommand}}
 	// Label config-file-derived credentials so doctor can distinguish
 	// "credentials persisted on disk" from "no credentials at all" — without
 	// this, users who saved via set-token without an env var see a blank
@@ -167,30 +201,19 @@ func Load(configPath string) (*Config, error) {
 	// config file path is exposed separately as report["config_path"], and
 	// embedding it in auth_source leaks the user's home directory through
 	// doctor's JSON envelope.
-	if cfg.AuthSource == "" && (cfg.AuthHeaderVal != ""{{- if .HasAuthCommand}} || cfg.AccessToken != ""{{- end}}) {
+	if cfg.AuthSource == "" && cfg.hasCredentialFields() {
 		cfg.AuthSource = "config"
 	}
+{{- end}}
 {{- if eq .Auth.Type "oauth2_refresh"}}
 	if cfg.RefreshToken != "" {
 		cfg.AuthSource = "oauth2_refresh"
 	}
 {{- end}}
-{{- if .Auth.EnvVarSpecs}}
-{{- range .Auth.EnvVarSpecs}}
-{{- if not (envVarIsBuiltinField .Name)}}
-	if cfg.AuthSource == "" && cfg.{{envVarField .Name}} != "" {
-		cfg.AuthSource = "config"
+{{- if .HasAuthCommand}}
+	if cfg.CredentialSource == "" && cfg.AuthSource == "config" {
+		cfg.CredentialSource = "legacy config path"
 	}
-{{- end}}
-{{- end}}
-{{- else if .Auth.EnvVars}}
-{{- range .Auth.EnvVars}}
-{{- if not (envVarIsBuiltinField .)}}
-	if cfg.AuthSource == "" && cfg.{{envVarField .}} != "" {
-		cfg.AuthSource = "config"
-	}
-{{- end}}
-{{- end}}
 {{- end}}
 {{- if hasNonCookieAuth .Auth}}
 
@@ -206,6 +229,10 @@ func Load(configPath string) (*Config, error) {
 		marker := filepath.Join(filepath.Dir(cfg.Path), ".agentcookie-managed")
 		if _, err := os.Stat(marker); err == nil {
 			cfg.AuthSource = "agentcookie"
+{{- if .HasAuthCommand}}
+			cfg.CredentialSource = "agentcookie"
+			cfg.AgentcookieManaged = true
+{{- end}}
 		}
 	}
 {{- end}}
@@ -280,6 +307,45 @@ func Load(configPath string) (*Config, error) {
 {{- end}}
 {{- end}}
 	return cfg, nil
+}
+
+func resolveConfigPath(configPath string) (string, bool, error) {
+	if strings.TrimSpace(configPath) != "" {
+		return configPath, true, nil
+	}
+	if path := os.Getenv("{{envName .Name}}_CONFIG"); path != "" {
+		return path, true, nil
+	}
+	dir, err := cliutil.ConfigDir()
+	if err != nil {
+		return "", false, err
+	}
+	return filepath.Join(dir, "config.{{or .Config.Format "json"}}"), false, nil
+}
+
+func legacyConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve legacy config path: %w", err)
+	}
+	return filepath.Join(home, ".config", "{{.Name}}-pp-cli", "config.{{or .Config.Format "json"}}"), nil
+}
+
+func readConfigFile(path string, cfg *Config, owner string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+{{- if eq .Config.Format "toml"}}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parsing %s %s: %w", owner, path, err)
+	}
+{{- else}}
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parsing %s %s: %w", owner, path, err)
+	}
+{{- end}}
+	return nil
 }
 
 {{- if endpointTemplateVarsHasDefault .EndpointTemplateVars}}
@@ -633,6 +699,167 @@ func ensureAuthScheme(scheme, token string) string {
 
 {{- if .HasAuthCommand}}
 
+func (c *Config) agentcookieManaged() bool {
+{{- if hasNonCookieAuth .Auth}}
+	if c.AgentcookieManaged || c.AuthSource == "agentcookie" || c.CredentialSource == "agentcookie" {
+		return true
+	}
+	if c.Path == "" {
+		return false
+	}
+	marker := filepath.Join(filepath.Dir(c.Path), ".agentcookie-managed")
+	if _, err := os.Stat(marker); err == nil {
+		return true
+	}
+{{- end}}
+	return false
+}
+
+func (c *Config) hasCredentialFields() bool {
+	if c.AuthHeaderVal != "" ||
+		c.AccessToken != "" ||
+		c.RefreshToken != "" ||
+		!c.TokenExpiry.IsZero() ||
+		c.ClientID != "" ||
+		c.ClientSecret != ""{{- if .BearerRefresh.Enabled}} ||
+		!c.BearerTokenRefreshedAt.IsZero(){{- end}} {
+		return true
+	}
+{{- if .Auth.EnvVarSpecs}}
+{{- range .Auth.EnvVarSpecs}}
+{{- if not (envVarIsBuiltinField .Name)}}
+	if c.{{envVarField .Name}} != "" {
+		return true
+	}
+{{- end}}
+{{- end}}
+{{- else if .Auth.EnvVars}}
+{{- range .Auth.EnvVars}}
+{{- if not (envVarIsBuiltinField .)}}
+	if c.{{envVarField .}} != "" {
+		return true
+	}
+{{- end}}
+{{- end}}
+{{- end}}
+{{- range .Auth.AdditionalHeaders}}
+{{- if not (envVarIsBuiltinField .EnvVar.Name)}}
+	if c.{{envVarField .EnvVar.Name}} != "" {
+		return true
+	}
+{{- end}}
+{{- end}}
+	return false
+}
+
+func (c *Config) clearCredentialFields() {
+	c.AuthHeaderVal = ""
+	c.AccessToken = ""
+	c.RefreshToken = ""
+	c.TokenExpiry = time.Time{}
+	c.ClientID = ""
+	c.ClientSecret = ""
+{{- if .BearerRefresh.Enabled}}
+	c.BearerTokenRefreshedAt = time.Time{}
+{{- end}}
+{{- if .Auth.EnvVarSpecs}}
+{{- range .Auth.EnvVarSpecs}}
+{{- if not (envVarIsBuiltinField .Name)}}
+	c.{{envVarField .Name}} = ""
+{{- end}}
+{{- end}}
+{{- else if .Auth.EnvVars}}
+{{- range .Auth.EnvVars}}
+{{- if not (envVarIsBuiltinField .)}}
+	c.{{envVarField .}} = ""
+{{- end}}
+{{- end}}
+{{- end}}
+{{- range .Auth.AdditionalHeaders}}
+{{- if not (envVarIsBuiltinField .EnvVar.Name)}}
+	c.{{envVarField .EnvVar.Name}} = ""
+{{- end}}
+{{- end}}
+}
+
+func (c *Config) credentials() *cliutil.Credentials {
+	return &cliutil.Credentials{
+		AuthHeaderVal: c.AuthHeaderVal,
+		AccessToken:   c.AccessToken,
+		RefreshToken:  c.RefreshToken,
+		TokenExpiry:   c.TokenExpiry,
+{{- if .BearerRefresh.Enabled}}
+		BearerTokenRefreshedAt: c.BearerTokenRefreshedAt,
+{{- end}}
+		ClientID:     c.ClientID,
+		ClientSecret: c.ClientSecret,
+{{- if .Auth.EnvVarSpecs}}
+{{- range .Auth.EnvVarSpecs}}
+{{- if not (envVarIsBuiltinField .Name)}}
+		{{envVarField .Name}}: c.{{envVarField .Name}},
+{{- end}}
+{{- end}}
+{{- else if .Auth.EnvVars}}
+{{- range .Auth.EnvVars}}
+{{- if not (envVarIsBuiltinField .)}}
+		{{envVarField .}}: c.{{envVarField .}},
+{{- end}}
+{{- end}}
+{{- end}}
+{{- range .Auth.AdditionalHeaders}}
+{{- if not (envVarIsBuiltinField .EnvVar.Name)}}
+		{{envVarField .EnvVar.Name}}: c.{{envVarField .EnvVar.Name}},
+{{- end}}
+{{- end}}
+	}
+}
+
+func (c *Config) applyCredentials(creds *cliutil.Credentials) {
+	if creds == nil {
+		return
+	}
+	c.AuthHeaderVal = creds.AuthHeaderVal
+	c.AccessToken = creds.AccessToken
+	c.RefreshToken = creds.RefreshToken
+	c.TokenExpiry = creds.TokenExpiry
+{{- if .BearerRefresh.Enabled}}
+	c.BearerTokenRefreshedAt = creds.BearerTokenRefreshedAt
+{{- end}}
+	c.ClientID = creds.ClientID
+	c.ClientSecret = creds.ClientSecret
+{{- if .Auth.EnvVarSpecs}}
+{{- range .Auth.EnvVarSpecs}}
+{{- if not (envVarIsBuiltinField .Name)}}
+	c.{{envVarField .Name}} = creds.{{envVarField .Name}}
+{{- end}}
+{{- end}}
+{{- else if .Auth.EnvVars}}
+{{- range .Auth.EnvVars}}
+{{- if not (envVarIsBuiltinField .)}}
+	c.{{envVarField .}} = creds.{{envVarField .}}
+{{- end}}
+{{- end}}
+{{- end}}
+{{- range .Auth.AdditionalHeaders}}
+{{- if not (envVarIsBuiltinField .EnvVar.Name)}}
+	c.{{envVarField .EnvVar.Name}} = creds.{{envVarField .EnvVar.Name}}
+{{- end}}
+{{- end}}
+}
+
+func (c *Config) saveCredentialsFirst() error {
+	if c.agentcookieManaged() {
+		c.AgentcookieManaged = true
+		c.CredentialSource = "agentcookie"
+		return nil
+	}
+	if err := cliutil.SaveCredentials(c.credentials()); err != nil {
+		return err
+	}
+	c.CredentialSource = "credentials file"
+	return nil
+}
+
 func (c *Config) SaveTokens(clientID, clientSecret, accessToken, refreshToken string, expiry time.Time) error {
 	c.ClientID = clientID
 	c.ClientSecret = clientSecret
@@ -642,6 +869,9 @@ func (c *Config) SaveTokens(clientID, clientSecret, accessToken, refreshToken st
 {{- if .HasRequiredRoles}}
 	c.AuthRole = ""
 {{- end}}
+	if err := c.saveCredentialsFirst(); err != nil {
+		return err
+	}
 	return c.save()
 }
 
@@ -664,6 +894,9 @@ func (c *Config) SaveCredential(token string) error {
 {{- with .Auth.CanonicalEnvVar}}
 	c.{{resolveEnvVarField .Name}} = token
 {{- end}}
+	if err := c.saveCredentialsFirst(); err != nil {
+		return err
+	}
 	return c.save()
 }
 {{- end}}
@@ -692,6 +925,9 @@ func (c *Config) SaveBearerToken(accessToken string, refreshedAt time.Time) erro
 {{- end}}
 {{- end}}
 	c.BearerTokenRefreshedAt = refreshedAt
+	if err := c.saveCredentialsFirst(); err != nil {
+		return err
+	}
 	return c.save()
 }
 
@@ -735,6 +971,14 @@ func (c *Config) ClearTokens() error {
 	c.{{envVarField .EnvVar.Name}} = ""
 {{- end}}
 {{- end}}
+	if c.agentcookieManaged() {
+		c.AgentcookieManaged = true
+		c.CredentialSource = "agentcookie"
+		return nil
+	}
+	if err := cliutil.RemoveCredentials(); err != nil {
+		return err
+	}
 	return c.save()
 }
 {{- end}}
@@ -744,20 +988,89 @@ func (c *Config) save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
+	var persist any = c
+{{- if .HasAuthCommand}}
+	if !c.agentcookieManaged() {
+		persist = c.persisted()
+	}
+{{- end}}
 {{- if eq .Config.Format "toml"}}
-	data, err := toml.Marshal(c)
+	data, err := toml.Marshal(persist)
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return os.WriteFile(c.Path, data, 0o600)
+	return atomicWriteConfigFile(c.Path, data)
 {{- else}}
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(persist, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return os.WriteFile(c.Path, data, 0o600)
+	return atomicWriteConfigFile(c.Path, data)
 {{- end}}
 }
+
+func atomicWriteConfigFile(path string, data []byte) error {
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return fmt.Errorf("writing temporary config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("publishing config: %w", err)
+	}
+	return nil
+}
+
+{{- if .HasAuthCommand}}
+type persistedConfig struct {
+	BaseURL string `{{configTag .Config.Format}}:"base_url"`
+{{- if .BasePath}}
+	BasePath string `{{configTag .Config.Format}}:"base_path"`
+{{- end}}
+	Headers map[string]string `{{configTag .Config.Format}}:"headers,omitempty"`
+{{- if .HasRequiredRoles}}
+	AuthRole string `{{configTag .Config.Format}}:"auth_role,omitempty"`
+{{- end}}
+{{- if .Auth.AuthorizationURL}}
+	AuthorizationURL string `{{configTag .Config.Format}}:"authorization_url,omitempty"`
+{{- end}}
+{{- if .Auth.DeviceAuthorizationURL}}
+	DeviceAuthorizationURL string `{{configTag .Config.Format}}:"device_authorization_url,omitempty"`
+{{- end}}
+{{- if .Auth.TokenURL}}
+	TokenURL string `{{configTag .Config.Format}}:"token_url,omitempty"`
+{{- end}}
+{{- if or .EndpointTemplateVars .GlobalPathTemplateVars}}
+	TemplateVars map[string]string `{{configTag .Config.Format}}:"template_vars,omitempty"`
+{{- end}}
+}
+
+func (c *Config) persisted() persistedConfig {
+	return persistedConfig{
+		BaseURL: c.BaseURL,
+{{- if .BasePath}}
+		BasePath: c.BasePath,
+{{- end}}
+		Headers: c.Headers,
+{{- if .HasRequiredRoles}}
+		AuthRole: c.AuthRole,
+{{- end}}
+{{- if .Auth.AuthorizationURL}}
+		AuthorizationURL: c.AuthorizationURL,
+{{- end}}
+{{- if .Auth.DeviceAuthorizationURL}}
+		DeviceAuthorizationURL: c.DeviceAuthorizationURL,
+{{- end}}
+{{- if .Auth.TokenURL}}
+		TokenURL: c.TokenURL,
+{{- end}}
+{{- if or .EndpointTemplateVars .GlobalPathTemplateVars}}
+		TemplateVars: c.TemplateVars,
+{{- end}}
+	}
+}
+
+{{- end}}
 
 // Ensure strings import is used
 var _ = strings.ReplaceAll

@@ -44,9 +44,9 @@ func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := cmd.OutOrStdout()
 {{- if .Auth.KeyURL}}
-			fmt.Fprintln(w, "Register an app and copy the public client ID at: {{.Auth.KeyURL}}")
+			fmt.Fprintln(w, {{printf "%q" (printf "Register an app and copy the public client ID at: %s" .Auth.KeyURL)}})
 {{- else if .WebsiteURL}}
-			fmt.Fprintln(w, "See API docs for OAuth app registration: {{.WebsiteURL}}")
+			fmt.Fprintln(w, {{printf "%q" (printf "See API docs for OAuth app registration: %s" .WebsiteURL)}})
 {{- else}}
 			fmt.Fprintln(w, "No setup URL is configured for this CLI; check the API's docs.")
 {{- end}}
@@ -120,7 +120,7 @@ for CLIs and agents: no localhost callback server and no client secret.
 
 			tokenURL := cfg.TokenURL
 			if tokenURL == "" {
-				tokenURL = "{{.Auth.TokenURL}}"
+			tokenURL = {{printf "%q" .Auth.TokenURL}}
 			}
 			deviceAuthorizationURL := cfg.DeviceAuthorizationURL
 			if deviceAuthorizationURL == "" {
@@ -231,7 +231,7 @@ func newAuthPollCmd(flags *rootFlags) *cobra.Command {
 			clientID := state.ClientID
 			tokenURL := state.TokenURL
 			if tokenURL == "" {
-				tokenURL = "{{.Auth.TokenURL}}"
+			tokenURL = {{printf "%q" .Auth.TokenURL}}
 			}
 			ctx := cmd.Context()
 			if timeout > 0 {
@@ -279,7 +279,7 @@ func newAuthRefreshCmd(flags *rootFlags) *cobra.Command {
 			}
 			tokenURL := cfg.TokenURL
 			if tokenURL == "" {
-				tokenURL = "{{.Auth.TokenURL}}"
+			tokenURL = {{printf "%q" .Auth.TokenURL}}
 			}
 			tok, err := oauth.RefreshToken(cmd.Context(), nil, tokenURL, cfg.ClientID, cfg.ClientSecret, cfg.RefreshToken)
 			if err != nil {
