@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -407,12 +406,22 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 }
 
 func newMCPClient() (*client.Client, error) {
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".config", "printing-press-golden-pp-cli", "config.toml")
-	cfg, err := config.Load(cfgPath)
+	cfg, err := newMCPConfig()
+	if err != nil {
+		return nil, err
+	}
+	return newMCPClientFromConfig(cfg), nil
+}
+
+func newMCPConfig() (*config.Config, error) {
+	cfg, err := config.Load("")
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
+	return cfg, nil
+}
+
+func newMCPClientFromConfig(cfg *config.Config) *client.Client {
 	c := client.New(cfg, 60*time.Second, 0)
 	// Agents calling through MCP need fresh data every call. The on-disk
 	// response cache survives across MCP server invocations, so a
@@ -420,16 +429,16 @@ func newMCPClient() (*client.Client, error) {
 	// pre-mutation snapshot for up to the cache TTL. The interactive CLI
 	// constructs its own client and is unaffected.
 	c.NoCache = true
-	return c, nil
+	return c
 }
 
-func dbPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "printing-press-golden-pp-cli", "data.db")
+func mcpDBPath() (string, error) {
+	dir, err := cliutil.DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "data.db"), nil
 }
-
-// Note: MCP tools use their own dbPath() because they are in a separate package (main, not cli).
-// The CLI's defaultDBPath() in the cli package uses the same canonical path.
 
 func handleSearch(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	args := req.GetArguments()
@@ -443,7 +452,11 @@ func handleSearch(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.Call
 		limit = int(v)
 	}
 
-	db, err := store.OpenReadOnly(dbPath())
+	path, err := mcpDBPath()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("resolving database: %v", err)), nil
+	}
+	db, err := store.OpenReadOnly(path)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("opening database: %v", err)), nil
 	}
@@ -523,7 +536,11 @@ func handleSQL(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 		return mcplib.NewToolResultError(err.Error()), nil
 	}
 
-	db, err := store.OpenReadOnly(dbPath())
+	path, err := mcpDBPath()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("resolving database: %v", err)), nil
+	}
+	db, err := store.OpenReadOnly(path)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("opening database: %v", err)), nil
 	}

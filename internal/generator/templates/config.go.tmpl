@@ -348,6 +348,16 @@ func readConfigFile(path string, cfg *Config, owner string) error {
 	return nil
 }
 
+{{- if .HasAuthCommand}}
+func FileHasCredentialFields(path string) (bool, error) {
+	var cfg Config
+	if err := readConfigFile(path, &cfg, "credential probe"); err != nil {
+		return false, err
+	}
+	return cfg.hasCredentialFields(), nil
+}
+
+{{- end}}
 {{- if endpointTemplateVarsHasDefault .EndpointTemplateVars}}
 
 // normalizeEndpointTemplateValue cleans up a server-URL template value the

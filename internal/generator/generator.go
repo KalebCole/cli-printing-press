@@ -772,7 +772,8 @@ type helpersTemplateData struct {
 // knowledge of whether internal/store exists.
 type doctorTemplateData struct {
 	*spec.APISpec
-	HasStore bool
+	HasStore       bool
+	HasAuthCommand bool
 }
 
 // authTemplateData wraps APISpec with traffic-analysis generation hints that
@@ -1905,8 +1906,9 @@ func (g *Generator) renderSingleFiles() error {
 			}
 		case "doctor.go.tmpl":
 			data = &doctorTemplateData{
-				APISpec:  g.Spec,
-				HasStore: g.VisionSet.Store,
+				APISpec:        g.Spec,
+				HasStore:       g.VisionSet.Store,
+				HasAuthCommand: g.shouldEmitAuth(),
 			}
 		case "client.go.tmpl":
 			data = &clientTemplateData{

@@ -755,9 +755,15 @@ func TestGenerateAgentContextCommand(t *testing.T) {
 
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(out, &payload), "agent-context must emit valid JSON")
-	assert.Equal(t, "3", payload["schema_version"], "schema_version must be present")
+	assert.Equal(t, "4", payload["schema_version"], "schema_version must be present")
 	assert.Contains(t, payload, "cli")
 	assert.Contains(t, payload, "auth")
+	paths, ok := payload["paths"].(map[string]any)
+	require.True(t, ok, "agent-context must expose resolved paths")
+	for _, key := range []string{"config_dir", "data_dir", "state_dir", "cache_dir"} {
+		value, ok := paths[key].(string)
+		require.Truef(t, ok && value != "", "agent-context paths.%s must be populated", key)
+	}
 	assert.Contains(t, payload, "commands")
 
 	annotatedEndpoint := findAgentContextCommand(payload["commands"], func(command map[string]any) bool {

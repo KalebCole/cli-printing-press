@@ -29,6 +29,20 @@ var (
 	pathWarned       = map[string]struct{}{}
 )
 
+type PathResolution struct {
+	Kind             PathKind
+	KindName         string
+	Dir              string
+	Rung             string
+	Source           string
+	IgnoredOverrides []PathIgnoredOverride
+}
+
+type PathIgnoredOverride struct {
+	Name  string
+	Value string
+}
+
 func SetHomeOverride(path string) (func(), error) {
 	previous := pathHomeOverride
 	path = strings.TrimSpace(path)
@@ -42,6 +56,10 @@ func SetHomeOverride(path string) (func(), error) {
 	}
 	pathHomeOverride = clean
 	return func() { pathHomeOverride = previous }, nil
+}
+
+func HomeOverrideActive() bool {
+	return pathHomeOverride != ""
 }
 
 func ConfigDir() (string, error) {
@@ -61,23 +79,62 @@ func CacheDir() (string, error) {
 }
 
 func KindDir(kind PathKind) (string, error) {
-	if override, ok := envDir(kindEnvVar(kind)); ok {
-		return override, nil
-	}
-	if pathHomeOverride != "" {
-		return filepath.Join(pathHomeOverride, kindName(kind)), nil
-	}
-	if home, ok := envDir(envPrefix + "_HOME"); ok {
-		return filepath.Join(home, kindName(kind)), nil
-	}
-	if xdg, ok := envDir(xdgEnvVar(kind)); ok {
-		return filepath.Join(xdg, appName), nil
-	}
-	base, err := defaultBase(kind)
+	resolution, err := ResolveKindDir(kind)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, appName), nil
+	return resolution.Dir, nil
+}
+
+func ResolveKindDir(kind PathKind) (PathResolution, error) {
+	var ignored []PathIgnoredOverride
+	if override, ok, skipped := envDir(kindEnvVar(kind)); ok {
+		return pathResolution(kind, override, "per-kind-env", kindEnvVar(kind), ignored), nil
+	} else if skipped != nil {
+		ignored = append(ignored, *skipped)
+	}
+	if pathHomeOverride != "" {
+		return pathResolution(kind, filepath.Join(pathHomeOverride, kindName(kind)), "--home", "--home", ignored), nil
+	}
+	if home, ok, skipped := envDir(envPrefix + "_HOME"); ok {
+		return pathResolution(kind, filepath.Join(home, kindName(kind)), "home-env", envPrefix+"_HOME", ignored), nil
+	} else if skipped != nil {
+		ignored = append(ignored, *skipped)
+	}
+	if xdg, ok, skipped := envDir(xdgEnvVar(kind)); ok {
+		return pathResolution(kind, filepath.Join(xdg, appName), "xdg-env", xdgEnvVar(kind), ignored), nil
+	} else if skipped != nil {
+		ignored = append(ignored, *skipped)
+	}
+	base, err := defaultBase(kind)
+	if err != nil {
+		return PathResolution{}, err
+	}
+	return pathResolution(kind, filepath.Join(base, appName), "platform-default", "platform-default", ignored), nil
+}
+
+func AllPathResolutions() ([]PathResolution, error) {
+	kinds := []PathKind{PathKindConfig, PathKindData, PathKindState, PathKindCache}
+	resolutions := make([]PathResolution, 0, len(kinds))
+	for _, kind := range kinds {
+		resolution, err := ResolveKindDir(kind)
+		if err != nil {
+			return nil, err
+		}
+		resolutions = append(resolutions, resolution)
+	}
+	return resolutions, nil
+}
+
+func pathResolution(kind PathKind, dir, rung, source string, ignored []PathIgnoredOverride) PathResolution {
+	return PathResolution{
+		Kind:             kind,
+		KindName:         kindName(kind),
+		Dir:              dir,
+		Rung:             rung,
+		Source:           source,
+		IgnoredOverrides: ignored,
+	}
 }
 
 func KindName(kind PathKind) string {
@@ -129,20 +186,20 @@ func xdgEnvVar(kind PathKind) string {
 	}
 }
 
-func envDir(name string) (string, bool) {
+func envDir(name string) (string, bool, *PathIgnoredOverride) {
 	if name == "" {
-		return "", false
+		return "", false, nil
 	}
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
-		return "", false
+		return "", false, nil
 	}
 	clean, ok := cleanPathOverride(raw)
 	if !ok {
 		warnSkippedPathOverride(name, raw)
-		return "", false
+		return "", false, &PathIgnoredOverride{Name: name, Value: raw}
 	}
-	return clean, true
+	return clean, true, nil
 }
 
 func cleanPathOverride(raw string) (string, bool) {

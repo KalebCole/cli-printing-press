@@ -72,13 +72,14 @@ func TestTemplatesDoNotConstructRuntimeHomeRootsOutsideResolver(t *testing.T) {
 		"cliutil_paths_test.go.tmpl":       true, // Asserts the platform defaults.
 		"cliutil_credentials_test.go.tmpl": true, // Seeds legacy config states.
 		"config.go.tmpl":                   true, // Config legacy fallback.
+		"doctor.go.tmpl":                   true, // Doctor probes legacy config for credential-location warnings.
 		"jobs.go.tmpl":                     true, // Jobs legacy dotdir fallback.
-		"mcp_tools.go.tmpl":                true, // U5 owns MCP path parity.
 		"profile.go.tmpl":                  true, // Profile legacy dotdir fallback.
 		"readme.md.tmpl":                   true, // U7 owns user-facing docs.
 		"skill.md.tmpl":                    true, // U7 owns user-facing docs.
 		"learn/teach_log.go.tmpl":          true, // Teach-log legacy data-dir fallback.
 		"learn/teach_log_test.go.tmpl":     true, // Resolver default assertions.
+		"mcp_tools_test.go.tmpl":           true, // MCP parity test asserts platform defaults.
 	}
 	var offenders []string
 	root := "templates"

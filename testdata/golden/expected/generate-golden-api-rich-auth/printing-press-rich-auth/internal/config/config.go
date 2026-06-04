@@ -196,6 +196,13 @@ func readConfigFile(path string, cfg *Config, owner string) error {
 	}
 	return nil
 }
+func FileHasCredentialFields(path string) (bool, error) {
+	var cfg Config
+	if err := readConfigFile(path, &cfg, "credential probe"); err != nil {
+		return false, err
+	}
+	return cfg.hasCredentialFields(), nil
+}
 
 func (c *Config) AuthHeader() string {
 	if c.AuthHeaderVal != "" {

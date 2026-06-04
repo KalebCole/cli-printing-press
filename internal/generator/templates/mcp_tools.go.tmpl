@@ -16,7 +16,6 @@ import (
 {{- if $hasFormRequest}}
 	"net/url"
 {{- end}}
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,9 +23,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"{{modulePath}}/internal/cli"
-{{- if and .Auth.Type (ne .Auth.Type "none")}}
 	"{{modulePath}}/internal/cliutil"
-{{- end}}
 	"{{modulePath}}/internal/client"
 	"{{modulePath}}/internal/config"
 	"{{modulePath}}/internal/mcp/cobratree"
@@ -642,7 +639,6 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 }
 
 func newMCPClient() (*client.Client, error) {
-{{- if .HasRequiredRoles}}
 	cfg, err := newMCPConfig()
 	if err != nil {
 		return nil, err
@@ -651,19 +647,14 @@ func newMCPClient() (*client.Client, error) {
 }
 
 func newMCPConfig() (*config.Config, error) {
-{{- end}}
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".config", "{{.Name}}-pp-cli", "config.toml")
-	cfg, err := config.Load(cfgPath)
+	cfg, err := config.Load("")
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
-{{- if .HasRequiredRoles}}
 	return cfg, nil
 }
 
 func newMCPClientFromConfig(cfg *config.Config) *client.Client {
-{{- end}}
 {{- if eq .SpecSource "sniffed"}}
 	c := client.New(cfg, 60*time.Second, 2)
 {{- else}}
@@ -675,19 +666,16 @@ func newMCPClientFromConfig(cfg *config.Config) *client.Client {
 	// pre-mutation snapshot for up to the cache TTL. The interactive CLI
 	// constructs its own client and is unaffected.
 	c.NoCache = true
-{{- if .HasRequiredRoles}}
 	return c
-{{- else}}
-	return c, nil
-{{- end}}
 }
 
-func dbPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "{{.Name}}-pp-cli", "data.db")
+func mcpDBPath() (string, error) {
+	dir, err := cliutil.DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "data.db"), nil
 }
-// Note: MCP tools use their own dbPath() because they are in a separate package (main, not cli).
-// The CLI's defaultDBPath() in the cli package uses the same canonical path.
 
 {{- if .VisionSet.Search}}
 
@@ -703,7 +691,11 @@ func handleSearch(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.Call
 		limit = int(v)
 	}
 
-	db, err := store.OpenReadOnly(dbPath())
+	path, err := mcpDBPath()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("resolving database: %v", err)), nil
+	}
+	db, err := store.OpenReadOnly(path)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("opening database: %v", err)), nil
 	}
@@ -786,7 +778,11 @@ func handleSQL(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 		return mcplib.NewToolResultError(err.Error()), nil
 	}
 
-	db, err := store.OpenReadOnly(dbPath())
+	path, err := mcpDBPath()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("resolving database: %v", err)), nil
+	}
+	db, err := store.OpenReadOnly(path)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("opening database: %v", err)), nil
 	}
