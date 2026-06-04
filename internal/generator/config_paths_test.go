@@ -20,6 +20,7 @@ func TestGeneratedConfigPathPrecedenceAndAtomicSave(t *testing.T) {
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -150,17 +151,22 @@ func TestResolvedConfigWinsWhenLegacyAlsoExists(t *testing.T) {
 }
 
 func TestConfigSaveFailureLeavesOriginalParseable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission failure is POSIX-specific")
+	}
 	home, _ := resetPathTestEnv(t)
 	configPath := filepath.Join(home, "atomic", "config.toml")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+	configDir := filepath.Dir(configPath)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatalf("mkdir config: %v", err)
 	}
 	if err := os.WriteFile(configPath, []byte("base_url = \"https://before.example\"\n"), 0o600); err != nil {
 		t.Fatalf("write original: %v", err)
 	}
-	if err := os.Mkdir(configPath+".tmp", 0o700); err != nil {
-		t.Fatalf("mkdir blocking tmp: %v", err)
+	if err := os.Chmod(configDir, 0o500); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
 	}
+	defer os.Chmod(configDir, 0o700)
 	cfg := &Config{Path: configPath, BaseURL: "https://after.example"}
 	if err := cfg.save(); err == nil {
 		t.Fatalf("save() error = nil, want tmp write failure")

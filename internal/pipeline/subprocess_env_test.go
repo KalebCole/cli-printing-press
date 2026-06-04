@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
 )
 
 func TestApplyScopedConfigHomeRewritesHomeVars(t *testing.T) {
@@ -154,13 +156,8 @@ func TestSubprocessEnvScrubsScopedCLIRelocationVars(t *testing.T) {
 	home := currentSubprocessHome()
 
 	env := subprocessEnv()
-	for _, name := range []string{
-		"PRINTING_PRESS_RICH_HOME",
-		"PRINTING_PRESS_RICH_CONFIG_DIR",
-		"PRINTING_PRESS_RICH_DATA_DIR",
-		"PRINTING_PRESS_RICH_STATE_DIR",
-		"PRINTING_PRESS_RICH_CACHE_DIR",
-	} {
+	for _, suffix := range naming.PathKindEnvSuffixes() {
+		name := "PRINTING_PRESS_RICH_" + suffix
 		if envValue(env, name) != "" {
 			t.Fatalf("%s leaked into scoped subprocess env: %v", name, env)
 		}

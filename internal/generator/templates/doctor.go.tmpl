@@ -24,7 +24,7 @@ import (
 {{- if .BearerRefresh.Enabled}}
 	"net/http"
 {{- end}}
-{{- if or .Auth.EnvVarSpecs .Auth.EnvVars .Auth.AdditionalHeaders .HasStore .Auth.RequiresBrowserSession .HasTierRouting .HasAuthCommand}}
+{{- if or .Auth.EnvVarSpecs .Auth.EnvVars .Auth.AdditionalHeaders .HasStore .Auth.RequiresBrowserSession .HasTierRouting}}
 	"os"
 {{- end}}
 {{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}
@@ -968,7 +968,7 @@ func collectCredentialsLocationReport(report map[string]any, cfg *config.Config)
 	} else {
 		report["credentials_location"] = "none"
 	}
-	if cfg.CredentialSource == "agentcookie" || cfg.AuthSource == "agentcookie" || cfg.AgentcookieManaged {
+	if cfg.AgentcookieManagedByExternalStore() {
 		return
 	}
 
@@ -1005,8 +1005,8 @@ func legacyCredentialProbePaths(cfg *config.Config) []string {
 		add(cfg.Path)
 		add(filepath.Join(filepath.Dir(cfg.Path), "config.{{or .Config.Format "json"}}"))
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		add(filepath.Join(home, ".config", "{{.Name}}-pp-cli", "config.{{or .Config.Format "json"}}"))
+	if legacyPath, err := config.LegacyConfigPath(); err == nil {
+		add(legacyPath)
 	}
 	return paths
 }
@@ -1034,15 +1034,13 @@ func browserSessionProofStatus(cfg *config.Config, authHeader string) (bool, str
 	} else if cfg.Path != "" {
 		proofPath = filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
 	}
-	data, err := os.ReadFile(proofPath)
+	legacyPath := ""
+	if cfg.Path != "" {
+		legacyPath = filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+	}
+	data, _, err := cliutil.ReadFileWithLegacyFallback(proofPath, legacyPath)
 	if err != nil {
-		if cfg.Path != "" {
-			legacyPath := filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
-			data, err = os.ReadFile(legacyPath)
-		}
-		if err != nil {
-			return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
-		}
+		return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
 	}
 	var proof doctorBrowserSessionProof
 	if err := json.Unmarshal(data, &proof); err != nil {

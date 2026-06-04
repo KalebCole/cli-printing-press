@@ -237,15 +237,13 @@ func (m *SessionManager) loadFromDisk() {
 	if path == "" {
 		return
 	}
-	data, err := os.ReadFile(path)
+	legacy := ""
+	if m.configPath != "" {
+		legacy = filepath.Join(filepath.Dir(m.configPath), "session.json")
+	}
+	data, _, err := cliutil.ReadFileWithLegacyFallback(path, legacy)
 	if err != nil {
-		if m.configPath == "" {
-			return
-		}
-		data, err = os.ReadFile(filepath.Join(filepath.Dir(m.configPath), "session.json"))
-		if err != nil {
-			return
-		}
+		return
 	}
 	var rec sessionRecord
 	if err := json.Unmarshal(data, &rec); err != nil {

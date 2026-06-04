@@ -20,8 +20,11 @@ func TestPathsResolverEmitsAndGeneratedCLIBuilds(t *testing.T) {
 	pathsSrc := readGeneratedFile(t, outputDir, "internal", "cliutil", "paths.go")
 	require.Contains(t, pathsSrc, "type PathKind int")
 	require.Contains(t, pathsSrc, `const envPrefix = "PATHS_EMISSION"`)
-	require.Contains(t, pathsSrc, `envPrefix + "_DATA_DIR"`)
+	require.Contains(t, pathsSrc, `return envPrefix + "_" + suffix`)
 	require.Contains(t, pathsSrc, `envPrefix + "_HOME"`)
+	for _, suffix := range naming.PathKindEnvSuffixes()[1:] {
+		require.Contains(t, pathsSrc, `return "`+suffix+`"`)
+	}
 
 	rootSrc := readGeneratedFile(t, outputDir, "internal", "cli", "root.go")
 	require.Contains(t, rootSrc, `StringVar(&flags.homePath, "home"`)
@@ -72,7 +75,6 @@ func TestTemplatesDoNotConstructRuntimeHomeRootsOutsideResolver(t *testing.T) {
 		"cliutil_paths_test.go.tmpl":       true, // Asserts the platform defaults.
 		"cliutil_credentials_test.go.tmpl": true, // Seeds legacy config states.
 		"config.go.tmpl":                   true, // Config legacy fallback.
-		"doctor.go.tmpl":                   true, // Doctor probes legacy config for credential-location warnings.
 		"jobs.go.tmpl":                     true, // Jobs legacy dotdir fallback.
 		"profile.go.tmpl":                  true, // Profile legacy dotdir fallback.
 		"readme.md.tmpl":                   true, // U7 owns user-facing docs.

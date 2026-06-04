@@ -54,19 +54,17 @@ func loadProfileStore() (*profileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(p)
+	legacy, legacyErr := legacyProfileStorePath()
+	if legacyErr != nil || legacy == p {
+		legacy = ""
+	}
+	data, sourcePath, err := cliutil.ReadFileWithLegacyFallback(p, legacy)
 	if err != nil {
-		if os.IsNotExist(err) {
-			if legacy, legacyErr := legacyProfileStorePath(); legacyErr == nil && legacy != p {
-				if data, err = os.ReadFile(legacy); err == nil {
-					goto parse
-				}
-			}
+		if os.IsNotExist(err) || sourcePath == legacy {
 			return &profileStore{Profiles: map[string]Profile{}}, nil
 		}
 		return nil, fmt.Errorf("reading profiles: %w", err)
 	}
-parse:
 	var s profileStore
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parsing profiles: %w", err)

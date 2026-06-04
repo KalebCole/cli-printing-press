@@ -268,6 +268,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"envVarIsBuiltinField":               envVarIsBuiltinField,
 		"envVarBuiltinFieldName":             envVarBuiltinFieldName,
 		"resolveEnvVarField":                 resolveEnvVarField,
+		"pathKindEnvSuffix":                  pathKindEnvSuffix,
 		"authPlacement":                      authPlacement,
 		"authParameterName":                  authParameterName,
 		"authCommandShort":                   authCommandShort,
@@ -776,6 +777,22 @@ type doctorTemplateData struct {
 	HasAuthCommand bool
 }
 
+type credentialField struct {
+	GoField string
+	Tag     string
+}
+
+type credentialTemplateData struct {
+	*spec.APISpec
+	CredentialFields            []credentialField
+	UsesLegacyEnvVarCredentials bool
+}
+
+type pathsTemplateData struct {
+	*spec.APISpec
+	PathKindEnvSuffixes []string
+}
+
 // authTemplateData wraps APISpec with traffic-analysis generation hints that
 // control optional auth subcommands.
 type authTemplateData struct {
@@ -801,7 +818,9 @@ type clientTemplateData struct {
 // predicate the auth-command emission and root.go registration use.
 type configTemplateData struct {
 	*spec.APISpec
-	HasAuthCommand bool
+	HasAuthCommand              bool
+	CredentialFields            []credentialField
+	UsesLegacyEnvVarCredentials bool
 }
 
 // endpointTemplateData is the data passed to command_endpoint.go.tmpl for both
@@ -1315,6 +1334,44 @@ func authAgentEnvVars(auth spec.AuthConfig) []spec.AuthEnvVar {
 		add(header.EnvVar)
 	}
 	return envVars
+}
+
+func credentialFields(auth spec.AuthConfig) []credentialField {
+	var fields []credentialField
+	add := func(name string) {
+		if envVarIsBuiltinField(name) {
+			return
+		}
+		fields = append(fields, credentialField{
+			GoField: envVarField(name),
+			Tag:     naming.EnvVarPlaceholder(name),
+		})
+	}
+	if len(auth.EnvVarSpecs) > 0 {
+		for _, envVar := range auth.EnvVarSpecs {
+			add(envVar.Name)
+		}
+	} else {
+		for _, name := range auth.EnvVars {
+			add(name)
+		}
+	}
+	for _, header := range auth.AdditionalHeaders {
+		add(header.EnvVar.Name)
+	}
+	return fields
+}
+
+func usesLegacyEnvVarCredentials(auth spec.AuthConfig) bool {
+	return len(auth.EnvVarSpecs) == 0 && len(auth.EnvVars) > 0
+}
+
+func pathKindEnvSuffix(index int) string {
+	suffixes := naming.PathKindEnvSuffixes()
+	if index < 0 || index >= len(suffixes) {
+		return ""
+	}
+	return suffixes[index]
 }
 
 func hasAuthEnvVarKind(envVarSpecs []spec.AuthEnvVar, kind string) bool {
@@ -1910,6 +1967,17 @@ func (g *Generator) renderSingleFiles() error {
 				HasStore:       g.VisionSet.Store,
 				HasAuthCommand: g.shouldEmitAuth(),
 			}
+		case "cliutil_credentials.go.tmpl":
+			data = &credentialTemplateData{
+				APISpec:                     g.Spec,
+				CredentialFields:            credentialFields(g.Spec.Auth),
+				UsesLegacyEnvVarCredentials: usesLegacyEnvVarCredentials(g.Spec.Auth),
+			}
+		case "cliutil_paths.go.tmpl":
+			data = &pathsTemplateData{
+				APISpec:             g.Spec,
+				PathKindEnvSuffixes: naming.PathKindEnvSuffixes(),
+			}
 		case "client.go.tmpl":
 			data = &clientTemplateData{
 				APISpec:                    g.Spec,
@@ -1921,8 +1989,10 @@ func (g *Generator) renderSingleFiles() error {
 			}
 		case "config.go.tmpl":
 			data = &configTemplateData{
-				APISpec:        g.Spec,
-				HasAuthCommand: g.shouldEmitAuth(),
+				APISpec:                     g.Spec,
+				HasAuthCommand:              g.shouldEmitAuth(),
+				CredentialFields:            credentialFields(g.Spec.Auth),
+				UsesLegacyEnvVarCredentials: usesLegacyEnvVarCredentials(g.Spec.Auth),
 			}
 		case "agent_context.go.tmpl":
 			data = g.templateData()
@@ -1960,8 +2030,10 @@ func generatedTypesFileHasDeclarations(content string) bool {
 func (g *Generator) renderOptionalSupportFiles() error {
 	if g.shouldEmitAuth() {
 		authData := &configTemplateData{
-			APISpec:        g.Spec,
-			HasAuthCommand: true,
+			APISpec:                     g.Spec,
+			HasAuthCommand:              true,
+			CredentialFields:            credentialFields(g.Spec.Auth),
+			UsesLegacyEnvVarCredentials: usesLegacyEnvVarCredentials(g.Spec.Auth),
 		}
 		if err := g.renderTemplate("cliutil_credentials.go.tmpl", filepath.Join("internal", "cliutil", "credentials.go"), authData); err != nil {
 			return fmt.Errorf("rendering cliutil credentials: %w", err)

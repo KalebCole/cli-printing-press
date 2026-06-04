@@ -4,6 +4,7 @@
 package cliutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -78,6 +79,52 @@ func CacheDir() (string, error) {
 	return KindDir(PathKindCache)
 }
 
+func ReadFileWithLegacyFallback(primary, legacy string) ([]byte, string, error) {
+	data, err := os.ReadFile(primary)
+	if err == nil {
+		return data, primary, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) || legacy == "" || legacy == primary {
+		return nil, primary, err
+	}
+	data, legacyErr := os.ReadFile(legacy)
+	if legacyErr != nil {
+		return nil, legacy, legacyErr
+	}
+	return data, legacy, nil
+}
+
+func AtomicWritePrivateFile(path string, data []byte, fileMode, dirMode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		return fmt.Errorf("creating private file dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temporary private file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Chmod(fileMode); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("securing temporary private file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("writing temporary private file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("closing temporary private file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("publishing private file: %w", err)
+	}
+	return nil
+}
+
 func KindDir(kind PathKind) (string, error) {
 	resolution, err := ResolveKindDir(kind)
 	if err != nil {
@@ -137,10 +184,6 @@ func pathResolution(kind PathKind, dir, rung, source string, ignored []PathIgnor
 	}
 }
 
-func KindName(kind PathKind) string {
-	return kindName(kind)
-}
-
 func kindName(kind PathKind) string {
 	switch kind {
 	case PathKindConfig:
@@ -156,34 +199,35 @@ func kindName(kind PathKind) string {
 	}
 }
 
-func kindEnvVar(kind PathKind) string {
+func pathKindEnvSuffix(kind PathKind) string {
 	switch kind {
 	case PathKindConfig:
-		return envPrefix + "_CONFIG_DIR"
+		return "{{pathKindEnvSuffix 1}}"
 	case PathKindData:
-		return envPrefix + "_DATA_DIR"
+		return "{{pathKindEnvSuffix 2}}"
 	case PathKindState:
-		return envPrefix + "_STATE_DIR"
+		return "{{pathKindEnvSuffix 3}}"
 	case PathKindCache:
-		return envPrefix + "_CACHE_DIR"
+		return "{{pathKindEnvSuffix 4}}"
 	default:
 		return ""
 	}
 }
 
-func xdgEnvVar(kind PathKind) string {
-	switch kind {
-	case PathKindConfig:
-		return "XDG_CONFIG_HOME"
-	case PathKindData:
-		return "XDG_DATA_HOME"
-	case PathKindState:
-		return "XDG_STATE_HOME"
-	case PathKindCache:
-		return "XDG_CACHE_HOME"
-	default:
+func kindEnvVar(kind PathKind) string {
+	suffix := pathKindEnvSuffix(kind)
+	if suffix == "" {
 		return ""
 	}
+	return envPrefix + "_" + suffix
+}
+
+func xdgEnvVar(kind PathKind) string {
+	suffix := strings.TrimSuffix(pathKindEnvSuffix(kind), "_DIR")
+	if suffix == "" {
+		return ""
+	}
+	return "XDG_" + suffix + "_HOME"
 }
 
 func envDir(name string) (string, bool, *PathIgnoredOverride) {

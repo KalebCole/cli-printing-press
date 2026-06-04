@@ -78,22 +78,19 @@ func readJobRows() ([]JobRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(p)
+	legacy, legacyErr := legacyJobsFilePath()
+	if legacyErr != nil || legacy == p {
+		legacy = ""
+	}
+	data, sourcePath, err := cliutil.ReadFileWithLegacyFallback(p, legacy)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if legacy, legacyErr := legacyJobsFilePath(); legacyErr == nil && legacy != p {
-				if data, err = os.ReadFile(legacy); err != nil {
-					if os.IsNotExist(err) {
-						return nil, nil
-					}
-					return nil, fmt.Errorf("reading legacy jobs ledger: %w", err)
-				}
-			} else {
-				return nil, nil
-			}
-		} else {
-			return nil, fmt.Errorf("reading jobs ledger: %w", err)
+			return nil, nil
 		}
+		if sourcePath == legacy {
+			return nil, fmt.Errorf("reading legacy jobs ledger: %w", err)
+		}
+		return nil, fmt.Errorf("reading jobs ledger: %w", err)
 	}
 	var rows []JobRow
 	for _, line := range strings.Split(string(data), "\n") {

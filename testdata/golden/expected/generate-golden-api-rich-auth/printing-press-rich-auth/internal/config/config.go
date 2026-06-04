@@ -48,32 +48,33 @@ func Load(configPath string) (*Config, error) {
 	}
 	cfg.Path = path
 
-	// Try to load config file
-	loaded := false
-	if err := readConfigFile(path, cfg, "config-kind path"); err != nil {
-		if !os.IsNotExist(err) {
+	if explicitConfigFile {
+		if err := readConfigFile(path, cfg, "config-kind path"); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 	} else {
-		loaded = true
-	}
-	if !loaded && !explicitConfigFile {
-		legacyPath, err := legacyConfigPath()
+		legacyPath, err := LegacyConfigPath()
 		if err != nil {
 			return nil, err
 		}
-		if legacyPath != path {
-			if err := readConfigFile(legacyPath, cfg, "legacy config path"); err != nil {
-				if !os.IsNotExist(err) {
-					return nil, err
-				}
+		data, sourcePath, err := cliutil.ReadFileWithLegacyFallback(path, legacyPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, err
+			}
+		} else {
+			owner := "config-kind path"
+			if sourcePath == legacyPath {
+				owner = "legacy config path"
+			}
+			if err := parseConfigData(data, cfg, sourcePath, owner); err != nil {
+				return nil, err
 			}
 		}
 	}
 	cfg.Path = path
-	if cfg.agentcookieManaged() {
-		cfg.AgentcookieManaged = true
-		cfg.CredentialSource = "agentcookie"
+	if cfg.AgentcookieManagedByExternalStore() {
+		cfg.markAgentcookieManaged()
 	} else {
 		creds, ok, err := cliutil.LoadCredentials()
 		if err != nil {
@@ -152,8 +153,7 @@ func Load(configPath string) (*Config, error) {
 		marker := filepath.Join(filepath.Dir(cfg.Path), ".agentcookie-managed")
 		if _, err := os.Stat(marker); err == nil {
 			cfg.AuthSource = "agentcookie"
-			cfg.CredentialSource = "agentcookie"
-			cfg.AgentcookieManaged = true
+			cfg.markAgentcookieManaged()
 		}
 	}
 
@@ -178,7 +178,7 @@ func resolveConfigPath(configPath string) (string, bool, error) {
 	return filepath.Join(dir, "config.toml"), false, nil
 }
 
-func legacyConfigPath() (string, error) {
+func LegacyConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve legacy config path: %w", err)
@@ -191,6 +191,10 @@ func readConfigFile(path string, cfg *Config, owner string) error {
 	if err != nil {
 		return err
 	}
+	return parseConfigData(data, cfg, path, owner)
+}
+
+func parseConfigData(data []byte, cfg *Config, path string, owner string) error {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parsing %s %s: %w", owner, path, err)
 	}
@@ -231,7 +235,7 @@ func applyAuthFormat(format string, replacements map[string]string) string {
 	return format
 }
 
-func (c *Config) agentcookieManaged() bool {
+func (c *Config) AgentcookieManagedByExternalStore() bool {
 	if c.AgentcookieManaged || c.AuthSource == "agentcookie" || c.CredentialSource == "agentcookie" {
 		return true
 	}
@@ -243,6 +247,11 @@ func (c *Config) agentcookieManaged() bool {
 		return true
 	}
 	return false
+}
+
+func (c *Config) markAgentcookieManaged() {
+	c.AgentcookieManaged = true
+	c.CredentialSource = "agentcookie"
 }
 
 func (c *Config) hasCredentialFields() bool {
@@ -332,9 +341,8 @@ func (c *Config) applyCredentials(creds *cliutil.Credentials) {
 }
 
 func (c *Config) saveCredentialsFirst() error {
-	if c.agentcookieManaged() {
-		c.AgentcookieManaged = true
-		c.CredentialSource = "agentcookie"
+	if c.AgentcookieManagedByExternalStore() {
+		c.markAgentcookieManaged()
 		return nil
 	}
 	if err := cliutil.SaveCredentials(c.credentials()); err != nil {
@@ -394,9 +402,8 @@ func (c *Config) ClearTokens() error {
 	c.RichAuthOptionalToken = ""
 	c.RichAuthBotToken = ""
 	c.RichAuthUserToken = ""
-	if c.agentcookieManaged() {
-		c.AgentcookieManaged = true
-		c.CredentialSource = "agentcookie"
+	if c.AgentcookieManagedByExternalStore() {
+		c.markAgentcookieManaged()
 		return nil
 	}
 	if err := cliutil.RemoveCredentials(); err != nil {
@@ -406,31 +413,15 @@ func (c *Config) ClearTokens() error {
 }
 
 func (c *Config) save() error {
-	dir := filepath.Dir(c.Path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating config dir: %w", err)
-	}
 	var persist any = c
-	if !c.agentcookieManaged() {
+	if !c.AgentcookieManagedByExternalStore() {
 		persist = c.persisted()
 	}
 	data, err := toml.Marshal(persist)
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return atomicWriteConfigFile(c.Path, data)
-}
-
-func atomicWriteConfigFile(path string, data []byte) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return fmt.Errorf("writing temporary config: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("publishing config: %w", err)
-	}
-	return nil
+	return cliutil.AtomicWritePrivateFile(c.Path, data, 0o600, 0o700)
 }
 
 type persistedConfig struct {

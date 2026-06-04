@@ -271,7 +271,9 @@ log "checking generated MCP package under relocated home"
 
 log "smoking claimed output dir variant"
 ./printing-press generate --spec "$SPEC" --output "$CLI_DIR_2" --force --spec-url "file://$SPEC" --validate=false
-(cd "$CLI_DIR_2" && go mod tidy && go build -o "./$APP" "./cmd/$APP")
+cp "$CLI_DIR/go.mod" "$CLI_DIR_2/go.mod"
+cp "$CLI_DIR/go.sum" "$CLI_DIR_2/go.sum"
+(cd "$CLI_DIR_2" && go build -o "./$APP" "./cmd/$APP")
 BIN2="$CLI_DIR_2/$APP"
 VARIANT_HOME="$SCRATCH/variant-home"
 mkdir -p "$VARIANT_HOME"

@@ -5,6 +5,7 @@ package learn
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -107,25 +108,20 @@ func ReadTeachLogWarnings(resourceIDs ...string) ([]TeachLogEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p) // #nosec G304 -- path is per-user state under $HOME.
+	legacy, legacyErr := legacyTeachLogPath()
+	if legacyErr != nil || legacy == p {
+		legacy = ""
+	}
+	data, sourcePath, err := cliutil.ReadFileWithLegacyFallback(p, legacy)
 	if err != nil {
 		if os.IsNotExist(err) {
-			legacy, legacyErr := legacyTeachLogPath()
-			if legacyErr != nil || legacy == p {
-				return nil, nil
-			}
-			f, err = os.Open(legacy) // #nosec G304 -- legacy path is per-user data under $HOME.
-			if err != nil {
-				if os.IsNotExist(err) {
-					return nil, nil
-				}
-				return nil, fmt.Errorf("teach log: open %s: %w", legacy, err)
-			}
-		} else {
-			return nil, fmt.Errorf("teach log: open %s: %w", p, err)
+			return nil, nil
 		}
+		if sourcePath == legacy {
+			return nil, fmt.Errorf("teach log: open %s: %w", legacy, err)
+		}
+		return nil, fmt.Errorf("teach log: open %s: %w", p, err)
 	}
-	defer f.Close()
 
 	filter := make(map[string]struct{}, len(resourceIDs))
 	for _, id := range resourceIDs {
@@ -138,7 +134,7 @@ func ReadTeachLogWarnings(resourceIDs ...string) ([]TeachLogEntry, error) {
 	wantFilter := len(filter) > 0
 
 	var out []TeachLogEntry
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, 4096), 1<<20)
 	for scanner.Scan() {
 		line := scanner.Bytes()

@@ -1856,15 +1856,13 @@ func browserSessionProofStatusForAuth(cfg *config.Config, authHeader string) (bo
 	if authHeader == "" {
 		return false, "no browser session credentials configured"
 	}
-	data, err := os.ReadFile(browserSessionProofPath(cfg))
+	legacyPath := ""
+	if cfg.Path != "" {
+		legacyPath = filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
+	}
+	data, _, err := cliutil.ReadFileWithLegacyFallback(browserSessionProofPath(cfg), legacyPath)
 	if err != nil {
-		if cfg != nil && cfg.Path != "" {
-			legacyPath := filepath.Join(filepath.Dir(cfg.Path), "browser-session-proof.json")
-			data, err = os.ReadFile(legacyPath)
-		}
-		if err != nil {
-			return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
-		}
+		return false, "proof not found; run {{.Name}}-pp-cli auth login --chrome"
 	}
 	var proof browserSessionProof
 	if err := json.Unmarshal(data, &proof); err != nil {

@@ -115,7 +115,7 @@ func scopedCLIRelocationEnvVars(cliNames ...string) []string {
 			continue
 		}
 		prefix := naming.EnvPrefix(slug)
-		for _, suffix := range []string{"HOME", "CONFIG_DIR", "DATA_DIR", "STATE_DIR", "CACHE_DIR"} {
+		for _, suffix := range naming.PathKindEnvSuffixes() {
 			name := prefix + "_" + suffix
 			if seen[name] {
 				continue

@@ -478,7 +478,7 @@ func collectCredentialsLocationReport(report map[string]any, cfg *config.Config)
 	} else {
 		report["credentials_location"] = "none"
 	}
-	if cfg.CredentialSource == "agentcookie" || cfg.AuthSource == "agentcookie" || cfg.AgentcookieManaged {
+	if cfg.AgentcookieManagedByExternalStore() {
 		return
 	}
 
@@ -515,8 +515,8 @@ func legacyCredentialProbePaths(cfg *config.Config) []string {
 		add(cfg.Path)
 		add(filepath.Join(filepath.Dir(cfg.Path), "config.json"))
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		add(filepath.Join(home, ".config", "tier-routing-golden-pp-cli", "config.json"))
+	if legacyPath, err := config.LegacyConfigPath(); err == nil {
+		add(legacyPath)
 	}
 	return paths
 }
