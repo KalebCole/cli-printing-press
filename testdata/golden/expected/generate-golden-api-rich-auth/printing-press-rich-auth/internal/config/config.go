@@ -67,8 +67,15 @@ func Load(configPath string) (*Config, error) {
 			if sourcePath == legacyPath {
 				owner = "legacy config path"
 			}
-			if err := parseConfigData(data, cfg, sourcePath, owner); err != nil {
-				return nil, err
+			parsed := *cfg
+			if err := parseConfigData(data, &parsed, sourcePath, owner); err != nil {
+				if sourcePath == legacyPath {
+					fmt.Fprintf(os.Stderr, "warning: legacy config parse skipped for %s: %v\n", sourcePath, err)
+				} else {
+					return nil, err
+				}
+			} else {
+				*cfg = parsed
 			}
 		}
 	}
@@ -80,7 +87,7 @@ func Load(configPath string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		if ok {
+		if ok && creds.HasValues() {
 			cfg.clearCredentialFields()
 			cfg.applyCredentials(creds)
 			if cfg.hasCredentialFields() {
@@ -258,7 +265,6 @@ func (c *Config) hasCredentialFields() bool {
 	if c.AuthHeaderVal != "" ||
 		c.AccessToken != "" ||
 		c.RefreshToken != "" ||
-		!c.TokenExpiry.IsZero() ||
 		c.ClientID != "" ||
 		c.ClientSecret != "" {
 		return true

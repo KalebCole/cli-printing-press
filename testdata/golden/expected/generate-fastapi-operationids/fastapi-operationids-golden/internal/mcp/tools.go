@@ -323,11 +323,25 @@ func mcpDBPath() (string, error) {
 }
 
 func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	paths := map[string]string{}
+	if dir, err := cliutil.ConfigDir(); err == nil {
+		paths["config_dir"] = dir
+	}
+	if dir, err := cliutil.DataDir(); err == nil {
+		paths["data_dir"] = dir
+	}
+	if dir, err := cliutil.StateDir(); err == nil {
+		paths["state_dir"] = dir
+	}
+	if dir, err := cliutil.CacheDir(); err == nil {
+		paths["cache_dir"] = dir
+	}
 	ctx := map[string]any{
 		"api":         "fastapi-operationids-golden",
 		"description": "Fixture for FastAPI default operationId normalization.",
 		"archetype":   "generic",
 		"tool_count":  8,
+		"paths":       paths,
 		// tool_surface tells agents which surface a capability lives on.
 		"tool_surface": "MCP exposes typed endpoint tools plus a runtime mirror of user-facing CLI commands. Endpoint tools keep typed schemas; command-mirror tools shell out to the companion fastapi-operationids-golden-pp-cli binary.",
 		"resources": []map[string]any{

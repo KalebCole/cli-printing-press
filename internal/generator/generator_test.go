@@ -9897,6 +9897,8 @@ func TestGenerate_CookieAuthUsesBrowserTemplate(t *testing.T) {
 	assert.Contains(t, content, "validateAndWriteBrowserSessionProof")
 	assert.Contains(t, content, "validateAndWriteBrowserSessionProofWithRetry")
 	assert.Contains(t, content, "browser-session-proof.json")
+	assert.Contains(t, content, "legacyPath != proofPath")
+	assert.Contains(t, content, "os.Remove(legacyPath)")
 	assert.Contains(t, content, "newAuthRefreshCmd")
 	assert.Contains(t, content, "auth refresh")
 	assert.Contains(t, content, "openBrowserForCookieRefresh")

@@ -41,6 +41,7 @@ run_cli() {
 write_mock_server() {
   local script="$SCRATCH/mock_server.py"
   local port_file="$SCRATCH/mock_port"
+  local server_log="$SCRATCH/mock_server.stderr"
   cat >"$script" <<'PY'
 import http.server
 import json
@@ -72,14 +73,25 @@ with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
     port_file.write_text(str(httpd.server_address[1]))
     httpd.serve_forever()
 PY
-  python3 "$script" "$port_file" >/dev/null 2>&1 &
+  python3 "$script" "$port_file" >/dev/null 2>"$server_log" &
   SERVER_PID="$!"
   for _ in {1..100}; do
     [[ -s "$port_file" ]] && break
+    if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+      echo "mock server exited before publishing its port" >&2
+      tail -40 "$server_log" >&2 || true
+      exit 1
+    fi
     sleep 0.05
   done
+  if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    echo "mock server exited during startup" >&2
+    tail -40 "$server_log" >&2 || true
+    exit 1
+  fi
   if [[ ! -s "$port_file" ]]; then
     echo "mock server did not start" >&2
+    tail -40 "$server_log" >&2 || true
     exit 1
   fi
   printf 'http://127.0.0.1:%s/v1' "$(cat "$port_file")"

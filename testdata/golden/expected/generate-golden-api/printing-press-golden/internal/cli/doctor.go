@@ -145,10 +145,15 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 		Short: "Check CLI health",
 		Example: `  printing-press-golden-pp-cli doctor
   printing-press-golden-pp-cli doctor --json
-  printing-press-golden-pp-cli doctor --fail-on warn`,
+  printing-press-golden-pp-cli doctor --fail-on warn
+  printing-press-golden-pp-cli doctor --fail-on stale`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			report := map[string]any{}
-			report["paths"] = collectPathsReport()
+			pathsReport := collectPathsReport()
+			report["paths"] = pathsReport
+			if warning := pathsWarning(pathsReport); warning != "" {
+				report["paths_warning"] = warning
+			}
 
 			// Check config
 			cfg, err := config.Load(flags.configPath)
@@ -316,6 +321,7 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 				{"auth", "Auth"},
 				{"env_vars", "Env Vars"},
 				{"verify_mode", "Verify Mode"},
+				{"paths_warning", "Paths"},
 				{"credentials_location_warning", "Credentials Storage"},
 				{"api", "API"},
 				{"credentials", "Credentials"},
@@ -379,7 +385,7 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 			return doctorExitForFailOn(failOn, report)
 		},
 	}
-	cmd.Flags().StringVar(&failOn, "fail-on", "", "Exit non-zero when a health level is reached: stale, warn, error. Default is never.")
+	cmd.Flags().StringVar(&failOn, "fail-on", "", "Exit non-zero for selected health gates. stale: cache freshness plus errors; warn: credential/path warnings plus errors; error: errors only. Default is never.")
 	return cmd
 }
 
@@ -423,6 +429,27 @@ func collectPathsReport() map[string]any {
 		report["notes"] = notes
 	}
 	return report
+}
+
+func pathsWarning(report map[string]any) string {
+	if report == nil {
+		return ""
+	}
+	var parts []string
+	if raw, ok := report["skipped_relative_overrides"].([]map[string]string); ok && len(raw) > 0 {
+		names := make([]string, 0, len(raw))
+		for _, entry := range raw {
+			names = append(names, entry["name"])
+		}
+		parts = append(parts, "relative override skipped: "+strings.Join(names, ", "))
+	}
+	if raw, ok := report["notes"].([]string); ok && len(raw) > 0 {
+		parts = append(parts, "home override shadowed")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "WARN paths: " + strings.Join(parts, "; ")
 }
 
 func renderPathsReport(w io.Writer, rep map[string]any) {
@@ -500,9 +527,9 @@ func legacyCredentialProbePaths(cfg *config.Config) []string {
 }
 
 // doctorExitForFailOn returns a non-nil error when the report's worst
-// status meets the --fail-on threshold. "error" trips on failing sections,
-// "warn" also trips on deliberate WARN sections, and "stale" also trips when
-// the cache section is stale. The default empty string means never fail on status.
+// status meets the --fail-on gate. "error" trips on failing sections, "warn"
+// trips on deliberate WARN sections plus errors, and "stale" trips on cache
+// freshness plus errors. The default empty string means never fail on status.
 func doctorExitForFailOn(failOn string, report map[string]any) error {
 	if failOn == "" {
 		return nil

@@ -1967,12 +1967,6 @@ func (g *Generator) renderSingleFiles() error {
 				HasStore:       g.VisionSet.Store,
 				HasAuthCommand: g.shouldEmitAuth(),
 			}
-		case "cliutil_credentials.go.tmpl":
-			data = &credentialTemplateData{
-				APISpec:                     g.Spec,
-				CredentialFields:            credentialFields(g.Spec.Auth),
-				UsesLegacyEnvVarCredentials: usesLegacyEnvVarCredentials(g.Spec.Auth),
-			}
 		case "cliutil_paths.go.tmpl":
 			data = &pathsTemplateData{
 				APISpec:             g.Spec,

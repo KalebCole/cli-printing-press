@@ -18,6 +18,8 @@ func TestGeneratedConfigPathPrecedenceAndAtomicSave(t *testing.T) {
 	const runtimeTest = `package config
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -150,6 +152,39 @@ func TestResolvedConfigWinsWhenLegacyAlsoExists(t *testing.T) {
 	}
 }
 
+func TestRelocatedLoadWarnsAndSkipsMalformedLegacyWhenCredentialsExist(t *testing.T) {
+	home, legacyPath := resetPathTestEnv(t)
+	resolvedDir := filepath.Join(home, "xdg-config")
+	dataDir := filepath.Join(home, "xdg-data")
+	t.Setenv("CONFIG_PATHS_CONFIG_DIR", resolvedDir)
+	t.Setenv("CONFIG_PATHS_DATA_DIR", dataDir)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatalf("mkdir legacy: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("base_url = ["), 0o600); err != nil {
+		t.Fatalf("write malformed legacy: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "credentials.toml"), []byte("token = \"credentials-secret\"\n"), 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+
+	stderr := captureConfigPathStderr(t, func() {
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if got := cfg.AuthHeader(); got != "Bearer credentials-secret" {
+			t.Fatalf("AuthHeader() = %q, want credentials file value", got)
+		}
+	})
+	if !strings.Contains(stderr, legacyPath) || !strings.Contains(stderr, "parse") {
+		t.Fatalf("stderr %q does not mention legacy path and parse action", stderr)
+	}
+}
+
 func TestConfigSaveFailureLeavesOriginalParseable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission failure is POSIX-specific")
@@ -178,6 +213,22 @@ func TestConfigSaveFailureLeavesOriginalParseable(t *testing.T) {
 	if string(data) != "base_url = \"https://before.example\"\n" {
 		t.Fatalf("original config changed after failed save:\n%s", string(data))
 	}
+}
+
+func captureConfigPathStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	fn()
+	_ = w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
 }
 `
 	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "config", "config_paths_runtime_test.go"), []byte(runtimeTest), 0o644))

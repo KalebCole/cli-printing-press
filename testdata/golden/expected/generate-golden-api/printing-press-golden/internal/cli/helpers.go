@@ -1790,7 +1790,10 @@ func wrapWithProvenance(data json.RawMessage, prov DataProvenance) (json.RawMess
 func defaultDBPath(name string) string {
 	dir, err := cliutil.DataDir()
 	if err != nil {
-		return filepath.Join(name, "data.db")
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			return filepath.Join(home, ".local", "share", name, "data.db")
+		}
+		return "data.db"
 	}
 	return filepath.Join(dir, "data.db")
 }

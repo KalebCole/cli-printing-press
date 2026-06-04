@@ -171,7 +171,7 @@ func RunLiveCheck(opts LiveCheckOptions) *LiveCheckResult {
 		out.Reason = "CLIDir is required"
 		return out
 	}
-	releaseHome, err := scopeSubprocessHome(findCLIName(opts.CLIDir))
+	releaseHome, err := scopeSubprocessHome(findCLINames(opts.CLIDir)...)
 	if err != nil {
 		out.Unable = true
 		out.Reason = err.Error()

@@ -75,6 +75,7 @@ func TestTemplatesDoNotConstructRuntimeHomeRootsOutsideResolver(t *testing.T) {
 		"cliutil_paths_test.go.tmpl":       true, // Asserts the platform defaults.
 		"cliutil_credentials_test.go.tmpl": true, // Seeds legacy config states.
 		"config.go.tmpl":                   true, // Config legacy fallback.
+		"helpers.go.tmpl":                  true, // defaultDBPath legacy fallback after data-dir resolution failure.
 		"jobs.go.tmpl":                     true, // Jobs legacy dotdir fallback.
 		"profile.go.tmpl":                  true, // Profile legacy dotdir fallback.
 		"readme.md.tmpl":                   true, // U7 owns user-facing docs.

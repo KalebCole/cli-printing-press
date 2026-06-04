@@ -43,20 +43,30 @@ func TestGeneratedDoctorReportsPathsAndPathWarnings(t *testing.T) {
 	require.Equal(t, prefix+"_DATA_DIR", dataEntry["source"])
 	require.Equal(t, dataDir, dataEntry["dir"])
 
-	env = append(doctorEnv(home, prefix), prefix+"_DATA_DIR=relative/data")
+	env = append(doctorEnv(home, prefix), "MYAPI_TOKEN=doctor-token", prefix+"_DATA_DIR=relative/data")
 	payload, err = runDoctorJSON(t, binaryPath, env)
 	require.NoError(t, err)
 	skipped, ok := requirePathsPayload(t, payload)["skipped_relative_overrides"].([]any)
 	require.True(t, ok, "relative override should be surfaced")
 	require.NotEmpty(t, skipped)
+	require.Contains(t, payload["paths_warning"], "WARN paths: relative override skipped: "+prefix+"_DATA_DIR")
+	require.NotContains(t, payload["paths_warning"], "error")
+	require.NotContains(t, payload["paths_warning"], "invalid")
+	require.NotContains(t, payload["paths_warning"], "missing")
+	require.NotContains(t, payload["paths_warning"], "unreachable")
+	_, err = runDoctorJSON(t, binaryPath, env, "--fail-on", "warn")
+	require.Error(t, err, "--fail-on=warn should trip on relative path override warnings")
+	_, err = runDoctorJSON(t, binaryPath, env, "--fail-on", "error")
+	require.NoError(t, err, "--fail-on=error should not trip on path WARN text")
 
 	shadowedData := filepath.Join(t.TempDir(), "shadow-data")
-	env = append(doctorEnv(home, prefix), prefix+"_DATA_DIR="+shadowedData)
+	env = append(doctorEnv(home, prefix), "MYAPI_TOKEN=doctor-token", prefix+"_DATA_DIR="+shadowedData)
 	payload, err = runDoctorJSON(t, binaryPath, env, "--home", filepath.Join(t.TempDir(), "flag-home"))
 	require.NoError(t, err)
 	notes, ok := requirePathsPayload(t, payload)["notes"].([]any)
 	require.True(t, ok, "--home shadow note should be surfaced")
 	require.Contains(t, notes[0].(string), prefix+"_DATA_DIR")
+	require.Contains(t, payload["paths_warning"], "WARN paths: home override shadowed")
 }
 
 func TestGeneratedDoctorCredentialStateBWarnAndFailOnWarn(t *testing.T) {

@@ -93,7 +93,7 @@ func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
 		return nil, fmt.Errorf("resolving CLI directory: %w", err)
 	}
 	cfg.Dir = absDir
-	releaseHome, err := scopeSubprocessHome(findCLIName(cfg.Dir))
+	releaseHome, err := scopeSubprocessHome(findCLINames(cfg.Dir)...)
 	if err != nil {
 		return nil, err
 	}

@@ -187,7 +187,7 @@ func scopeLiveDogfoodSubprocessHome(cliDir string) (func(), error) {
 	if err == nil && manifest.IsLocalDatastore() && strings.EqualFold(strings.TrimSpace(manifest.AuthType), "none") {
 		return func() {}, nil
 	}
-	return scopeSubprocessHome(findCLIName(cliDir))
+	return scopeSubprocessHome(findCLINames(cliDir)...)
 }
 
 func liveDogfoodBinaryPath(dir, name string) (string, error) {

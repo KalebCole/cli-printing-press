@@ -274,11 +274,25 @@ func mcpDBPath() (string, error) {
 }
 
 func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	paths := map[string]string{}
+	if dir, err := cliutil.ConfigDir(); err == nil {
+		paths["config_dir"] = dir
+	}
+	if dir, err := cliutil.DataDir(); err == nil {
+		paths["data_dir"] = dir
+	}
+	if dir, err := cliutil.StateDir(); err == nil {
+		paths["state_dir"] = dir
+	}
+	if dir, err := cliutil.CacheDir(); err == nil {
+		paths["cache_dir"] = dir
+	}
 	ctx := map[string]any{
 		"api":         "public-param-golden",
 		"description": "Public parameter name golden fixture",
 		"archetype":   "generic",
 		"tool_count":  2,
+		"paths":       paths,
 		// tool_surface tells agents which surface a capability lives on.
 		"tool_surface": "MCP exposes typed endpoint tools plus a runtime mirror of user-facing CLI commands. Endpoint tools keep typed schemas; command-mirror tools shell out to the companion public-param-golden-pp-cli binary.",
 		"resources": []map[string]any{

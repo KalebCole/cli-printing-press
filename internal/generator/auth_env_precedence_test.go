@@ -878,6 +878,55 @@ func TestAuthHeader_EnvVarWinsOverFileToken(t *testing.T) {
 	}
 }
 
+func TestCredentialsRoundTripTestsRunForBrowserAndDeviceAuthFlavors(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		auth spec.AuthConfig
+	}{
+		{
+			name: "cookie-credentials-roundtrip",
+			auth: spec.AuthConfig{
+				Type:    "cookie",
+				Header:  "Authorization",
+				EnvVars: []string{"COOKIE_ROUNDTRIP_TOKEN"},
+			},
+		},
+		{
+			name: "composed-credentials-roundtrip",
+			auth: spec.AuthConfig{
+				Type:    "composed",
+				Header:  "Authorization",
+				EnvVars: []string{"COMPOSED_ROUNDTRIP_TOKEN"},
+			},
+		},
+		{
+			name: "device-code-credentials-roundtrip",
+			auth: spec.AuthConfig{
+				Type:                   "oauth2",
+				Header:                 "Authorization",
+				Format:                 "Bearer {token}",
+				OAuth2Grant:            spec.OAuth2GrantDeviceCode,
+				DeviceAuthorizationURL: "https://login.example.com/device",
+				TokenURL:               "https://login.example.com/token",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			apiSpec := minimalSpec(tc.name)
+			apiSpec.Auth = tc.auth
+			outputDir := filepath.Join(t.TempDir(), tc.name+"-pp-cli")
+			require.NoError(t, New(apiSpec, outputDir).Generate())
+			runGoCommand(t, outputDir, "test", "./internal/cliutil", "./internal/config")
+		})
+	}
+}
+
 func TestAuthHeader_PreservesConfigAuthSourceForStoredBearerToken(t *testing.T) {
 	t.Parallel()
 

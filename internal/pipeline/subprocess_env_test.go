@@ -166,6 +166,55 @@ func TestSubprocessEnvScrubsScopedCLIRelocationVars(t *testing.T) {
 	assertEnv(t, env, "XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 }
 
+func TestSubprocessEnvScrubsRelocationVarsWhenCLINameUnknown(t *testing.T) {
+	t.Setenv("FOO_DATA_DIR", filepath.Join(t.TempDir(), "poisoned-data"))
+	t.Setenv("FOO_CONFIG_DIR", filepath.Join(t.TempDir(), "poisoned-config"))
+	t.Setenv("FOO_API_TOKEN", "secret-token")
+
+	cleanup, err := scopeSubprocessHome()
+	if err != nil {
+		t.Fatalf("scopeSubprocessHome: %v", err)
+	}
+	defer cleanup()
+
+	env := subprocessEnv()
+	if envValue(env, "FOO_DATA_DIR") != "" || envValue(env, "FOO_CONFIG_DIR") != "" {
+		t.Fatalf("generic relocation vars leaked into scoped subprocess env: %v", env)
+	}
+	assertEnv(t, env, "FOO_API_TOKEN", "secret-token")
+}
+
+func TestFindCLINamesAndScopedEnvCoverMultipleCommandVariants(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"alpha-pp-cli", "beta-pp-cli"} {
+		if err := os.MkdirAll(filepath.Join(dir, "cmd", name), 0o700); err != nil {
+			t.Fatalf("mkdir cmd variant: %v", err)
+		}
+	}
+	names := findCLINames(dir)
+	if len(names) != 2 || names[0] != "alpha-pp-cli" || names[1] != "beta-pp-cli" {
+		t.Fatalf("findCLINames() = %v, want both variants", names)
+	}
+
+	t.Setenv("ALPHA_DATA_DIR", filepath.Join(t.TempDir(), "alpha-data"))
+	t.Setenv("BETA_DATA_DIR", filepath.Join(t.TempDir(), "beta-data"))
+	t.Setenv("ALPHA_API_TOKEN", "alpha-secret")
+	t.Setenv("BETA_API_TOKEN", "beta-secret")
+
+	cleanup, err := scopeSubprocessHome(names...)
+	if err != nil {
+		t.Fatalf("scopeSubprocessHome: %v", err)
+	}
+	defer cleanup()
+
+	env := subprocessEnv()
+	if envValue(env, "ALPHA_DATA_DIR") != "" || envValue(env, "BETA_DATA_DIR") != "" {
+		t.Fatalf("multi-variant relocation vars leaked into scoped subprocess env: %v", env)
+	}
+	assertEnv(t, env, "ALPHA_API_TOKEN", "alpha-secret")
+	assertEnv(t, env, "BETA_API_TOKEN", "beta-secret")
+}
+
 func TestApplyDefaultSubprocessEnvDogfoodAppendPreservesAPICredential(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses a shell script as the fake binary; skip on Windows")

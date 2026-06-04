@@ -173,6 +173,17 @@ func TestSetHomeOverrideRejectsRelative(t *testing.T) {
 	}
 }
 
+func TestSetHomeOverrideRejectsRegularFile(t *testing.T) {
+	resetPathEnv(t)
+	path := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(path, []byte("file"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if _, err := SetHomeOverride(path); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("SetHomeOverride(file) error = %v, want not-a-directory error", err)
+	}
+}
+
 func TestSetHomeOverrideExpandsTildeAndCleans(t *testing.T) {
 	home := resetPathEnv(t)
 	restore, err := SetHomeOverride("~/state/../root")
