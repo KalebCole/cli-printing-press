@@ -364,8 +364,8 @@ func containsEnv(env []string, name, want string) bool {
 func envValue(env []string, name string) string {
 	prefix := name + "="
 	for _, kv := range env {
-		if strings.HasPrefix(kv, prefix) {
-			return strings.TrimPrefix(kv, prefix)
+		if value, ok := strings.CutPrefix(kv, prefix); ok {
+			return value
 		}
 	}
 	return ""

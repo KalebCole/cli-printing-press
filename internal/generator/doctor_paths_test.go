@@ -144,7 +144,7 @@ func runDoctorJSON(t *testing.T, binaryPath string, env []string, extraArgs ...s
 		if ee, ok := err.(*exec.ExitError); ok {
 			out = ee.Stderr
 			if len(out) == 0 {
-				out = []byte(ee.ProcessState.String())
+				out = []byte(ee.String())
 			}
 		}
 	}

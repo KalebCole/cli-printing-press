@@ -782,12 +782,6 @@ type credentialField struct {
 	Tag     string
 }
 
-type credentialTemplateData struct {
-	*spec.APISpec
-	CredentialFields            []credentialField
-	UsesLegacyEnvVarCredentials bool
-}
-
 type pathsTemplateData struct {
 	*spec.APISpec
 	PathKindEnvSuffixes []string
