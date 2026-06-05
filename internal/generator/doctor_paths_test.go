@@ -208,3 +208,46 @@ func mapKeys(m map[string]any) []string {
 	}
 	return keys
 }
+
+// TestGeneratedDoctorCredentialLocationLabels pins the credentials_location
+// label for config-stored credentials: the label must report the file the
+// credentials were actually parsed from. Relocated config-kind paths and
+// explicit --config files are "config-kind path"; only a read that fell
+// back to the pre-paths layout reports "legacy config path".
+func TestGeneratedDoctorCredentialLocationLabels(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("doctor-cred-labels")
+	apiSpec.BaseURL = ""
+	_, binaryPath := buildGeneratedBinary(t, apiSpec)
+	prefix := naming.EnvPrefix(apiSpec.Name)
+
+	// Relocated config-kind path via per-kind env var.
+	relocatedDir := filepath.Join(t.TempDir(), "relocated-config")
+	require.NoError(t, os.MkdirAll(relocatedDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(relocatedDir, "config.toml"), []byte("token = \"relocated-secret\"\n"), 0o600))
+	env := append(doctorEnv(t.TempDir(), prefix), "MYAPI_TOKEN=", prefix+"_CONFIG_DIR="+relocatedDir)
+	payload, err := runDoctorJSON(t, binaryPath, env)
+	require.NoError(t, err)
+	require.Equal(t, "config-kind path", payload["credentials_location"],
+		"relocated config credentials must not be labeled legacy")
+
+	// Explicit --config file.
+	explicitPath := filepath.Join(t.TempDir(), "explicit.toml")
+	require.NoError(t, os.WriteFile(explicitPath, []byte("token = \"explicit-secret\"\n"), 0o600))
+	env = append(doctorEnv(t.TempDir(), prefix), "MYAPI_TOKEN=")
+	payload, err = runDoctorJSON(t, binaryPath, env, "--config", explicitPath)
+	require.NoError(t, err)
+	require.Equal(t, "config-kind path", payload["credentials_location"],
+		"explicit --config credentials must not be labeled legacy")
+
+	// Legacy fallback: the pre-paths location keeps the legacy label.
+	legacyHome := t.TempDir()
+	legacyDir := filepath.Join(legacyHome, ".config", apiSpec.Name+"-pp-cli")
+	require.NoError(t, os.MkdirAll(legacyDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyDir, "config.toml"), []byte("token = \"legacy-secret\"\n"), 0o600))
+	env = append(doctorEnv(legacyHome, prefix), "MYAPI_TOKEN=")
+	payload, err = runDoctorJSON(t, binaryPath, env)
+	require.NoError(t, err)
+	require.Equal(t, "legacy config path", payload["credentials_location"])
+}

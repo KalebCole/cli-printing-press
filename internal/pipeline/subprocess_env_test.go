@@ -166,9 +166,49 @@ func TestSubprocessEnvScrubsScopedCLIRelocationVars(t *testing.T) {
 	assertEnv(t, env, "XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 }
 
-func TestSubprocessEnvScrubsRelocationVarsWhenCLINameUnknown(t *testing.T) {
-	t.Setenv("FOO_DATA_DIR", filepath.Join(t.TempDir(), "poisoned-data"))
-	t.Setenv("FOO_CONFIG_DIR", filepath.Join(t.TempDir(), "poisoned-config"))
+// TestSubprocessEnvKeepsUnrelatedRelocationShapedVars pins the scrub's
+// scope: only the active CLI's relocation vars and the standard HOME/XDG
+// set are stripped. Operator setup that merely looks relocation-shaped
+// (JAVA_HOME, CARGO_HOME, ANDROID_HOME, CHROME_USER_DATA_DIR, another
+// API's *_DATA_DIR) must survive into verify/dogfood subprocesses, even
+// while the target CLI's own relocation vars are removed.
+func TestSubprocessEnvKeepsUnrelatedRelocationShapedVars(t *testing.T) {
+	unrelated := map[string]string{
+		"JAVA_HOME":            filepath.Join(t.TempDir(), "jdk"),
+		"CARGO_HOME":           filepath.Join(t.TempDir(), "cargo"),
+		"ANDROID_HOME":         filepath.Join(t.TempDir(), "android-sdk"),
+		"CHROME_USER_DATA_DIR": filepath.Join(t.TempDir(), "chrome-profile"),
+		"OTHERAPI_DATA_DIR":    filepath.Join(t.TempDir(), "otherapi-data"),
+		"FOO_CONFIG_DIR":       filepath.Join(t.TempDir(), "foo-config"),
+	}
+	for name, value := range unrelated {
+		t.Setenv(name, value)
+	}
+	t.Setenv("PRINTING_PRESS_RICH_DATA_DIR", filepath.Join(t.TempDir(), "poisoned-data"))
+
+	cleanup, err := scopeSubprocessHome("printing-press-rich-pp-cli")
+	if err != nil {
+		t.Fatalf("scopeSubprocessHome: %v", err)
+	}
+	defer cleanup()
+
+	env := subprocessEnv()
+	for name, value := range unrelated {
+		assertEnv(t, env, name, value)
+	}
+	if envValue(env, "PRINTING_PRESS_RICH_DATA_DIR") != "" {
+		t.Fatalf("target CLI relocation var leaked into scoped subprocess env: %v", env)
+	}
+}
+
+// TestSubprocessEnvKeepsRelocationVarsWhenCLINameUnknown documents the
+// trade-off of the scoped scrub: with no CLI names installed there is no
+// prefix to match, so relocation-shaped vars pass through untouched. The
+// production entry points all pass findCLINames(...), so this only arises
+// for sessions scoped before the CLI directory exists.
+func TestSubprocessEnvKeepsRelocationVarsWhenCLINameUnknown(t *testing.T) {
+	fooData := filepath.Join(t.TempDir(), "foo-data")
+	t.Setenv("FOO_DATA_DIR", fooData)
 	t.Setenv("FOO_API_TOKEN", "secret-token")
 
 	cleanup, err := scopeSubprocessHome()
@@ -178,9 +218,7 @@ func TestSubprocessEnvScrubsRelocationVarsWhenCLINameUnknown(t *testing.T) {
 	defer cleanup()
 
 	env := subprocessEnv()
-	if envValue(env, "FOO_DATA_DIR") != "" || envValue(env, "FOO_CONFIG_DIR") != "" {
-		t.Fatalf("generic relocation vars leaked into scoped subprocess env: %v", env)
-	}
+	assertEnv(t, env, "FOO_DATA_DIR", fooData)
 	assertEnv(t, env, "FOO_API_TOKEN", "secret-token")
 }
 

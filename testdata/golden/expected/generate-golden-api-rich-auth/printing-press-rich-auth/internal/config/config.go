@@ -15,25 +15,30 @@ import (
 )
 
 type Config struct {
-	BaseURL               string            `toml:"base_url"`
-	AuthHeaderVal         string            `toml:"auth_header"`
-	Headers               map[string]string `toml:"headers,omitempty"`
-	AuthSource            string            `toml:"-"`
-	CredentialSource      string            `toml:"-"`
-	AgentcookieManaged    bool              `toml:"-"`
-	AccessToken           string            `toml:"access_token"`
-	RefreshToken          string            `toml:"refresh_token"`
-	TokenExpiry           time.Time         `toml:"token_expiry"`
-	ClientID              string            `toml:"client_id"`
-	ClientSecret          string            `toml:"client_secret"`
-	Path                  string            `toml:"-"`
-	RichAuthApiKey        string            `toml:"auth_api_key"`
-	RichAuthClientId      string            `toml:"auth_client_id"`
-	RichAuthClientSecret  string            `toml:"auth_client_secret"`
-	RichAuthSessionCookie string            `toml:"auth_session_cookie"`
-	RichAuthOptionalToken string            `toml:"auth_optional_token"`
-	RichAuthBotToken      string            `toml:"auth_bot_token"`
-	RichAuthUserToken     string            `toml:"auth_user_token"`
+	BaseURL            string            `toml:"base_url"`
+	AuthHeaderVal      string            `toml:"auth_header"`
+	Headers            map[string]string `toml:"headers,omitempty"`
+	AuthSource         string            `toml:"-"`
+	CredentialSource   string            `toml:"-"`
+	AgentcookieManaged bool              `toml:"-"`
+	// configOwner records which on-disk file parseConfigData populated this
+	// config from ("config-kind path" or "legacy config path") so the
+	// credential-source fallback below reports where config-stored
+	// credentials actually live. Unexported: never persisted.
+	configOwner           string
+	AccessToken           string    `toml:"access_token"`
+	RefreshToken          string    `toml:"refresh_token"`
+	TokenExpiry           time.Time `toml:"token_expiry"`
+	ClientID              string    `toml:"client_id"`
+	ClientSecret          string    `toml:"client_secret"`
+	Path                  string    `toml:"-"`
+	RichAuthApiKey        string    `toml:"auth_api_key"`
+	RichAuthClientId      string    `toml:"auth_client_id"`
+	RichAuthClientSecret  string    `toml:"auth_client_secret"`
+	RichAuthSessionCookie string    `toml:"auth_session_cookie"`
+	RichAuthOptionalToken string    `toml:"auth_optional_token"`
+	RichAuthBotToken      string    `toml:"auth_bot_token"`
+	RichAuthUserToken     string    `toml:"auth_user_token"`
 }
 
 func Load(configPath string) (*Config, error) {
@@ -145,7 +150,14 @@ func Load(configPath string) (*Config, error) {
 		cfg.AuthSource = "config"
 	}
 	if cfg.CredentialSource == "" && cfg.AuthSource == "config" {
-		cfg.CredentialSource = "legacy config path"
+		// Label config-stored credentials with the file they were parsed
+		// from: the resolved config-kind path (covers --home and per-kind
+		// env relocation as well as explicit --config files) or the legacy
+		// config path when the read fell back to the pre-paths layout.
+		cfg.CredentialSource = cfg.configOwner
+		if cfg.CredentialSource == "" {
+			cfg.CredentialSource = "legacy config path"
+		}
 	}
 
 	// Soft agentcookie integration: if the agentcookie daemon manages this
@@ -205,6 +217,7 @@ func parseConfigData(data []byte, cfg *Config, path string, owner string) error 
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parsing %s %s: %w", owner, path, err)
 	}
+	cfg.configOwner = owner
 	return nil
 }
 func FileHasCredentialFields(path string) (bool, error) {
@@ -410,7 +423,10 @@ func (c *Config) ClearTokens() error {
 	c.RichAuthUserToken = ""
 	if c.AgentcookieManagedByExternalStore() {
 		c.markAgentcookieManaged()
-		return nil
+		// save() persists the full config (credential fields included) for
+		// agentcookie-managed stores, so the zeroed fields must be written
+		// back; returning early would leave the secrets on disk.
+		return c.save()
 	}
 	if err := cliutil.RemoveCredentials(); err != nil {
 		return err

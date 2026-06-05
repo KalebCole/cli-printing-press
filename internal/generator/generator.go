@@ -856,9 +856,15 @@ type readmeTemplateData struct {
 	HasWriteCommands   bool
 	HasDelete          bool
 	HasAuth            bool
-	HasAutoRefresh     bool
-	FreshnessCommands  []string
-	TrafficAnalysis    *trafficAnalysisTemplateData
+	// HasAuthCommand mirrors Generator.shouldEmitAuth() so doc templates can
+	// gate credential-file prose on the same predicate that controls auth
+	// command emission. Distinct from HasAuth: an empty auth type still emits
+	// the auth surface, and docs must follow the emitted surface, not the
+	// spec's declared type.
+	HasAuthCommand    bool
+	HasAutoRefresh    bool
+	FreshnessCommands []string
+	TrafficAnalysis   *trafficAnalysisTemplateData
 	// PromotedResourceNames maps a resource name to true when the generator
 	// collapsed that single-endpoint resource into a leaf command. Templates
 	// (notably skill.md.tmpl's Command Reference) use this to emit `<cli>
@@ -915,6 +921,7 @@ func (g *Generator) readmeData() *readmeTemplateData {
 		HasWriteCommands:      hasWriteCommands(g.Spec.Resources),
 		HasDelete:             computeHelperFlags(g.Spec).HasDelete,
 		HasAuth:               hasAuth(g.Spec.Auth),
+		HasAuthCommand:        g.shouldEmitAuth(),
 		HasAutoRefresh:        g.hasAutoRefresh(),
 		FreshnessCommands:     g.freshnessCommandPaths(),
 		TrafficAnalysis:       g.trafficAnalysisData(),

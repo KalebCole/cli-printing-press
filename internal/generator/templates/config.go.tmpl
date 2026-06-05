@@ -35,6 +35,11 @@ type Config struct {
 {{- if .HasAuthCommand}}
 	CredentialSource string `{{configTag .Config.Format}}:"-"`
 	AgentcookieManaged bool `{{configTag .Config.Format}}:"-"`
+	// configOwner records which on-disk file parseConfigData populated this
+	// config from ("config-kind path" or "legacy config path") so the
+	// credential-source fallback below reports where config-stored
+	// credentials actually live. Unexported: never persisted.
+	configOwner string
 {{- end}}
 {{- if .HasRequiredRoles}}
 	AuthRole       string `{{configTag .Config.Format}}:"auth_role,omitempty"`
@@ -207,7 +212,14 @@ func Load(configPath string) (*Config, error) {
 {{- end}}
 {{- if .HasAuthCommand}}
 	if cfg.CredentialSource == "" && cfg.AuthSource == "config" {
-		cfg.CredentialSource = "legacy config path"
+		// Label config-stored credentials with the file they were parsed
+		// from: the resolved config-kind path (covers --home and per-kind
+		// env relocation as well as explicit --config files) or the legacy
+		// config path when the read fell back to the pre-paths layout.
+		cfg.CredentialSource = cfg.configOwner
+		if cfg.CredentialSource == "" {
+			cfg.CredentialSource = "legacy config path"
+		}
 	}
 {{- end}}
 {{- if hasNonCookieAuth .Auth}}
@@ -342,6 +354,9 @@ func parseConfigData(data []byte, cfg *Config, path string, owner string) error 
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parsing %s %s: %w", owner, path, err)
 	}
+{{- end}}
+{{- if .HasAuthCommand}}
+	cfg.configOwner = owner
 {{- end}}
 	return nil
 }
@@ -906,7 +921,10 @@ func (c *Config) ClearTokens() error {
 {{- end}}
 	if c.AgentcookieManagedByExternalStore() {
 		c.markAgentcookieManaged()
-		return nil
+		// save() persists the full config (credential fields included) for
+		// agentcookie-managed stores, so the zeroed fields must be written
+		// back; returning early would leave the secrets on disk.
+		return c.save()
 	}
 	if err := cliutil.RemoveCredentials(); err != nil {
 		return err

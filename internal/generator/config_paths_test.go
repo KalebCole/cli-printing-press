@@ -239,3 +239,90 @@ func captureConfigPathStderr(t *testing.T, fn func()) string {
 	require.Contains(t, string(configSrc), "config-kind path")
 	require.Contains(t, string(configSrc), "legacy config path")
 }
+
+// TestGeneratedAgentcookieLogoutRemovesConfigStoredSecrets is the
+// generated-output regression for ClearTokens on agentcookie-managed
+// stores: save() persists the full config (credential fields included)
+// when .agentcookie-managed exists, so logout must write the zeroed
+// fields back instead of returning early and leaving the secret in
+// config.toml.
+func TestGeneratedAgentcookieLogoutRemovesConfigStoredSecrets(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("agentcookie-logout")
+	outputDir := filepath.Join(t.TempDir(), "agentcookie-logout-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	const runtimeTest = `package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestClearTokensRemovesConfigStoredSecretsWhenAgentcookieManaged(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"AGENTCOOKIE_LOGOUT_CONFIG",
+		"AGENTCOOKIE_LOGOUT_CONFIG_DIR",
+		"AGENTCOOKIE_LOGOUT_DATA_DIR",
+		"AGENTCOOKIE_LOGOUT_STATE_DIR",
+		"AGENTCOOKIE_LOGOUT_CACHE_DIR",
+		"AGENTCOOKIE_LOGOUT_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
+		"XDG_STATE_HOME",
+		"XDG_CACHE_HOME",
+		"MYAPI_TOKEN",
+	} {
+		t.Setenv(name, "")
+	}
+	configDir := filepath.Join(home, ".config", "agentcookie-logout-pp-cli")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("token = \"agentcookie-secret\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, ".agentcookie-managed"), []byte("managed\n"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.AgentcookieManagedByExternalStore() {
+		t.Fatalf("fixture not detected as agentcookie-managed; AuthSource=%q", cfg.AuthSource)
+	}
+	if cfg.AuthHeader() == "" {
+		t.Fatal("fixture credentials not loaded from config")
+	}
+	if err := cfg.ClearTokens(); err != nil {
+		t.Fatalf("ClearTokens() error = %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after logout: %v", err)
+	}
+	if strings.Contains(string(data), "agentcookie-secret") {
+		t.Fatalf("config-stored secret survived ClearTokens:\n%s", string(data))
+	}
+
+	reloaded, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() after logout error = %v", err)
+	}
+	if got := reloaded.AuthHeader(); got != "" {
+		t.Fatalf("AuthHeader() = %q after logout, want empty", got)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "config", "config_agentcookie_logout_test.go"), []byte(runtimeTest), 0o644))
+	runGoCommand(t, outputDir, "test", "./internal/config", "-run", "TestClearTokensRemovesConfigStoredSecrets")
+}

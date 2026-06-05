@@ -404,7 +404,7 @@ This CLI separates local files into four path kinds:
 | Kind | Contents |
 |------|----------|
 | `config` | User-editable settings such as `config.toml` and saved profiles |
-| `data` | Durable local data: `credentials.toml`, `data.db`, cookies, browser-session proof files, and other auth sidecars |
+| `data` | Durable local data{{if .HasAuthCommand}}: `credentials.toml`, `data.db`, cookies, browser-session proof files, and other auth sidecars{{else}} such as `data.db`{{end}} |
 | `state` | Runtime state such as persisted queries, jobs, and `teach.log` |
 | `cache` | Regenerable HTTP/cache files |
 
@@ -442,9 +442,13 @@ MCP servers do not receive CLI flags from the host. Put relocation in the host `
 
 Precedence matters in fleets: an ambient per-kind variable such as `{{envName .Name}}_DATA_DIR` overrides an explicit `--home` for that kind. Use `{{envName .Name}}_HOME` or the per-kind variables for durable fleet relocation; treat `--home` as the weaker per-invocation lever.
 
-Relocation is one-way. Unsetting `{{envName .Name}}_HOME` does not move files back to platform defaults, and `doctor` cannot find credentials left under a former root. Move the files manually before unsetting relocation variables.
+Relocation is one-way. Unsetting `{{envName .Name}}_HOME` does not move files back to platform defaults, and `doctor` cannot find {{if .HasAuthCommand}}credentials{{else}}files{{end}} left under a former root. Move the files manually before unsetting relocation variables.
 
+{{if .HasAuthCommand -}}
 Existing installs keep working because the platform-default rung matches the legacy layout. On the first auth write, stored secrets leave `config.toml` and are consolidated into `credentials.toml` under the data directory. Run `{{.Name}}-pp-cli doctor --fail-on warn` to check path and credential-location warnings in automation.
+{{- else -}}
+Existing installs keep working because the platform-default rung matches the legacy layout. Run `{{.Name}}-pp-cli doctor --fail-on warn` to check path warnings in automation.
+{{- end}}
 
 ## Commands
 {{range $name, $resource := .Resources}}

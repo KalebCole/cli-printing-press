@@ -111,7 +111,9 @@ func ApplyProfileToFlags(cmd *cobra.Command, profile *Profile) error {
 		return nil
 	}
 	// Reserved flags that never come from a profile - they control profile
-	// resolution itself or are dangerous to overlay.
+	// resolution itself or are dangerous to overlay. profile save's skip
+	// map must remain a superset of this set so saved profiles never carry
+	// values that apply would silently refuse.
 	reserved := map[string]bool{
 		"profile": true, "config": true, "home": true, "help": true,
 	}
@@ -186,7 +188,8 @@ them under <name>. To update an existing profile, run save again; the
 entry is replaced.
 
 To avoid creating empty profiles, at least one non-default flag must be
-present (other than --profile and --config).`,
+present (other than --profile, --config, and --home, which are never
+captured: they control profile/config resolution and would never apply).`,
 		Example: `  printing-press-golden-pp-cli profile save my-defaults --json --compact
   printing-press-golden-pp-cli profile save tonight-defaults --region US`,
 		Args: cobra.ExactArgs(1),
@@ -197,7 +200,10 @@ present (other than --profile and --config).`,
 			}
 			values := map[string]string{}
 			// Walk inherited + local flags, capture only those the user set.
-			skip := map[string]bool{"profile": true, "config": true, "help": true, "description": true}
+			// Must stay a superset of ApplyProfileToFlags' reserved map for
+			// root flags: capturing a flag that apply refuses to overlay
+			// would store values that never take effect.
+			skip := map[string]bool{"profile": true, "config": true, "home": true, "help": true, "description": true}
 			visit := func(fl *pflag.Flag) {
 				if fl.Changed && !skip[fl.Name] {
 					values[fl.Name] = fl.Value.String()

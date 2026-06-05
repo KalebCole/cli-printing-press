@@ -56,7 +56,10 @@ func newScopedConfigHome() (string, func(), error) {
 // parent's $HOME. Existing entries for the rewritten vars are dropped.
 // Optional cliRelocationEnvVars drop that CLI's relocation env vars so operator-level
 // <PREFIX>_HOME / <PREFIX>_<KIND>_DIR values cannot leak through verify
-// and dogfood subprocesses.
+// and dogfood subprocesses. Stripping is deliberately scoped to those
+// explicit names plus the standard HOME/XDG set: a suffix-based sweep
+// would also drop unrelated operator setup such as JAVA_HOME, CARGO_HOME,
+// or API-specific *_DATA_DIR variables that subprocesses legitimately need.
 // homeDir == "" returns env unchanged.
 func applyScopedConfigHome(env []string, homeDir string, cliRelocationEnvVars ...string) []string {
 	if homeDir == "" {
@@ -65,7 +68,7 @@ func applyScopedConfigHome(env []string, homeDir string, cliRelocationEnvVars ..
 	overrides := scopedConfigHomeOverrides(homeDir)
 	out := make([]string, 0, len(env)+len(overrides))
 	for _, kv := range env {
-		if isScopedConfigHomeEntry(kv) || isRelocationOverrideEnvEntry(kv) || isScopedCLIEnvEntry(kv, cliRelocationEnvVars) {
+		if isScopedConfigHomeEntry(kv) || isScopedCLIEnvEntry(kv, cliRelocationEnvVars) {
 			continue
 		}
 		out = append(out, kv)
@@ -134,38 +137,6 @@ func isScopedCLIEnvEntry(kv string, names []string) bool {
 		}
 	}
 	return false
-}
-
-func isRelocationOverrideEnvEntry(kv string) bool {
-	name, _, ok := strings.Cut(kv, "=")
-	if !ok {
-		name = kv
-	}
-	for _, suffix := range naming.PathKindEnvSuffixes() {
-		tail := "_" + suffix
-		if !strings.HasSuffix(name, tail) {
-			continue
-		}
-		prefix := strings.TrimSuffix(name, tail)
-		if isUpperEnvPrefix(prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func isUpperEnvPrefix(prefix string) bool {
-	if prefix == "" || prefix[0] < 'A' || prefix[0] > 'Z' {
-		return false
-	}
-	for i := 1; i < len(prefix); i++ {
-		ch := prefix[i]
-		if (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 // scopedHomeDir holds the active scoped home for child invocations of
