@@ -104,6 +104,52 @@ func staleGeneratedCommand() {}
 	runGoCommandForCLITest(t, outputDir, "build", "./cmd/regenapp-pp-cli")
 }
 
+func TestApplyLibraryAttributionForGeneratePreservesCreatorAndPrependsReprinter(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+
+	libDir := filepath.Join(pipeline.PublishedLibraryRoot(), "test")
+	require.NoError(t, os.MkdirAll(libDir, 0o755))
+	require.NoError(t, pipeline.WriteCLIManifest(libDir, pipeline.CLIManifest{
+		SchemaVersion: pipeline.CurrentCLIManifestSchemaVersion,
+		APIName:       "test",
+		CLIName:       "test-pp-cli",
+		Creator:       &spec.Person{Handle: "mvanhorn", Name: "Matt Van Horn"},
+		Contributors:  []spec.Person{{Handle: "jane-doe", Name: "Jane Doe"}},
+		Owner:         "mvanhorn",
+		Printer:       "mvanhorn",
+		PrinterName:   "Matt Van Horn",
+	}))
+
+	apiSpec := &spec.APISpec{
+		Name:    "test",
+		Creator: spec.Person{Handle: "tmchow", Name: "Trevin Chow"},
+		Owner:   "tmchow",
+	}
+	applyLibraryAttributionForGenerate(apiSpec, spec.Person{Handle: "tmchow", Name: "Trevin Chow"})
+
+	assert.Equal(t, "mvanhorn", apiSpec.Creator.Handle)
+	assert.Equal(t, "Matt Van Horn", apiSpec.Creator.Name)
+	assert.Equal(t, "mvanhorn", apiSpec.Owner)
+	require.Len(t, apiSpec.Contributors, 2)
+	assert.Equal(t, "tmchow", apiSpec.Contributors[0].Handle, "reprinter is front-listed")
+	assert.Equal(t, "jane-doe", apiSpec.Contributors[1].Handle)
+}
+
+func TestApplyLibraryAttributionForGenerateLeavesBrandNewAPIAlone(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+
+	apiSpec := &spec.APISpec{
+		Name:    "new-api",
+		Creator: spec.Person{Handle: "tmchow", Name: "Trevin Chow"},
+	}
+	applyLibraryAttributionForGenerate(apiSpec, spec.Person{Handle: "tmchow", Name: "Trevin Chow"})
+
+	assert.Equal(t, "tmchow", apiSpec.Creator.Handle)
+	assert.Empty(t, apiSpec.Contributors)
+}
+
 func TestGenerateCmdForcePreservesExistingModulePathForImports(t *testing.T) {
 	t.Parallel()
 
@@ -154,6 +200,45 @@ resources:
 
 	runGoCommandForCLITest(t, outputDir, "mod", "tidy")
 	runGoCommandForCLITest(t, outputDir, "build", "./cmd/tenderned-pp-cli")
+}
+
+func TestGenerateDeviceSpecArchiveUsesRenamedCLIName(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "device.yaml")
+	outputDir := filepath.Join(dir, "renamed-device")
+	require.NoError(t, os.WriteFile(specPath, []byte(`version: 1
+name: original-device
+display_name: Original Device
+protocol: ble
+ble:
+  services:
+    - uuid: "ff00"
+      characteristics:
+        - uuid: "ff01"
+          properties: [read]
+capabilities:
+  telemetry:
+    - name: battery
+      source_characteristic_uuid: "ff01"
+session:
+  mode: one-shot
+`), 0o644))
+
+	cmd := newGenerateCmd()
+	cmd.SetArgs([]string{
+		"--spec", specPath,
+		"--name", "renamed-device",
+		"--output", outputDir,
+		"--validate=false",
+	})
+	require.NoError(t, cmd.Execute())
+
+	archived, err := os.ReadFile(filepath.Join(outputDir, "device-spec.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(archived), "name: renamed-device")
+	assert.NotContains(t, string(archived), "name: original-device")
 }
 
 func TestGenerateCmdForcePreservesManuscriptsAndManifestExtras(t *testing.T) {

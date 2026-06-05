@@ -18,8 +18,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "1.0.0"
-
 type rootFlags struct {
 	asJSON        bool
 	compact       bool
@@ -247,7 +245,7 @@ Run 'fastapi-operationids-golden-pp-cli doctor' to verify auth and connectivity.
 	rootCmd.AddCommand(newAPICmd(flags))
 	rootCmd.AddCommand(newHealthPromotedCmd(flags))
 	rootCmd.AddCommand(newItemsPromotedCmd(flags))
-	rootCmd.AddCommand(newVersionCliCmd())
+	rootCmd.AddCommand(newVersionCmd())
 
 	return rootCmd
 }
@@ -299,14 +297,4 @@ func (f *rootFlags) printTable(w *cobra.Command, headers []string, rows [][]stri
 		fmt.Fprintln(tw, line)
 	}
 	return tw.Flush()
-}
-
-func newVersionCliCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: "Print version",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("%s %s\n", cmd.Root().Name(), version)
-		},
-	}
 }

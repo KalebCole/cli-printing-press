@@ -52,6 +52,7 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		"README.md",
 		"SKILL.md",
 		"internal/cli/root.go",
+		"internal/cli/version.go",
 		"internal/cli/which.go",
 		"internal/cli/profile.go",
 		"internal/cli/feedback.go",
@@ -98,9 +99,9 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		// Bump it AND add to mustInclude above when adding always-emitted
 		// templates. Per-spec dynamic files (per-resource command files,
 		// generated tests) account for the difference between fixtures.
-		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 75},
-		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 80},
-		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 77},
+		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 76},
+		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 81},
+		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 78},
 	}
 
 	for _, tt := range tests {
@@ -3750,6 +3751,45 @@ func TestGenerateMCPSQLToolUsesReadOnlyStore(t *testing.T) {
 	mcpTestCode := string(mcpTestSrc)
 	assert.Contains(t, mcpTestCode, "TestValidateReadOnlyQuery_RejectsBypassVectors",
 		"behavioral coverage of comment-prefix and statement-separator bypass vectors must ship into every printed CLI's mcp package")
+}
+
+// TestGenerateMCPSQLToolSurfacesRowErrors pins the emitted handleSQL error
+// handling so a regression to the silent-discard form (which returns a
+// truncated result set as a successful tool call) fails fast. It also pins the
+// shared toolResultJSON helper that surfaces a result-encoding failure instead
+// of discarding the json.MarshalIndent error.
+func TestGenerateMCPSQLToolSurfacesRowErrors(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("rowerr-canary")
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{Store: true, Search: true, MCP: true}
+	require.NoError(t, gen.Generate())
+
+	mcpSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "tools.go"))
+	require.NoError(t, err)
+	mcpCode := stripGoComments(string(mcpSrc))
+
+	assert.NotContains(t, mcpCode, "cols, _ := rows.Columns()",
+		"handleSQL must not discard the rows.Columns() error")
+	assert.Contains(t, mcpCode, "cols, err := rows.Columns()",
+		"handleSQL must capture and check the rows.Columns() error")
+	assert.Regexp(t, `if err := rows\.Scan\(ptrs\.\.\.\); err != nil`, mcpCode,
+		"handleSQL must check the rows.Scan error rather than ignore it")
+	assert.Regexp(t, `if err := rows\.Err\(\); err != nil`, mcpCode,
+		"handleSQL must check rows.Err() after the loop so a truncated result set is not returned as success")
+
+	assert.Contains(t, mcpCode, "func toolResultJSON(",
+		"mcp package must expose toolResultJSON so result encoding surfaces marshal errors")
+	assert.NotContains(t, mcpCode, `json.MarshalIndent(results, "", "  ")`,
+		"handleSQL/handleSearch must route result encoding through toolResultJSON, not discard the json.MarshalIndent error")
+	assert.Regexp(t, `(?s)func toolResultJSON\(.*json\.MarshalIndent\(v.*if err != nil`, mcpCode,
+		"toolResultJSON must check the json.MarshalIndent error")
+
+	// Compile-check the emission: the cols, err := redeclaration reusing the
+	// err already bound by db.Query must still build.
+	requireGeneratedCompiles(t, outputDir)
 }
 
 // stripGoComments removes // line comments and /* ... */ block comments from
@@ -11010,8 +11050,9 @@ func TestGeneratedSyncTreatsAccessDeniedAsWarning(t *testing.T) {
 
 	// Sync emits the structured warn event and routes to the warn-aware exit branch.
 	assert.Contains(t, syncContent, `Warn     error`)
-	assert.Contains(t, syncContent, `{"event":"sync_warning"`)
-	assert.Contains(t, syncContent, `"status":%d,"reason":"%s"`)
+	// The access-denied warning is marshaled via syncWarningJSON (escaping the
+	// embedded upstream error body) rather than raw fmt.Fprintf interpolation.
+	assert.Contains(t, syncContent, `syncWarningJSON(resource, "", w.Status, w.Reason, w.Message)`)
 	assert.Contains(t, syncContent, `{"event":"sync_summary"`)
 	assert.Contains(t, syncContent, `Sync complete: %d records across %d resources (%d warned, %.1fs)`)
 	assert.Contains(t, syncContent, `successCount == 0`)
@@ -17037,4 +17078,61 @@ paths:
 		assert.Regexp(t, `Short:\s+"List and get invoices"`, string(invoicesSrc))
 		assert.NotRegexp(t, `Coordinate commerce workflows`, string(invoicesSrc))
 	})
+}
+
+// TestSyncWarningEmitsValidJSON guards the contract that sync_warning events
+// are emitted as valid single-line JSON. The message field carries an upstream
+// error body that can be multi-line pretty-printed JSON; the old raw
+// fmt.Fprintf path escaped only quotes, so embedded newlines broke the NDJSON
+// stream (dogfood json_fidelity rejected it). The generated code must route
+// warnings through syncWarningJSON, which marshals the event.
+func TestSyncWarningEmitsValidJSON(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "warnjson",
+		Version: "0.1.0",
+		BaseURL: "https://warnjson.example.com",
+		Auth:    spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/warnjson-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"messages": {
+				Description: "Messages",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:      "GET",
+						Path:        "/messages",
+						Description: "List messages",
+						Response:    spec.ResponseDef{Type: "array"},
+					},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{Store: true, Sync: true}
+	require.NoError(t, gen.Generate())
+
+	helpersSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "helpers.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(helpersSrc), "func syncWarningJSON(",
+		"helpers.go must define syncWarningJSON")
+	assert.Contains(t, string(helpersSrc), "json.Marshal(payload)",
+		"syncWarningJSON must marshal the event rather than interpolate it")
+
+	syncSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "sync.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(syncSrc), "syncWarningJSON(",
+		"sync.go must route sync_warning events through syncWarningJSON")
+	assert.NotContains(t, string(syncSrc), `ReplaceAll(w.Message`,
+		"sync.go must not quote-only-escape the warning message (drops newline escaping)")
+	// Compile-level proof for the emitted sync.go + helpers.go is covered by
+	// scripts/verify-generator-output.sh (which builds the generate-golden-api
+	// module, exercising the syncWarningJSON call site); asserting the contract
+	// here keeps the canary close to the template change.
 }
