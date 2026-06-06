@@ -237,6 +237,7 @@ Run 'learn-loop-example-pp-cli doctor' to verify auth and connectivity.`,
 		// race a background seed.
 		if !noLearnActive(flags) && !shouldSkipLearnHook(cmd.CommandPath()) {
 			runLearnInitOnce(cmd.Context())
+			runPlaybookInitOnce(cmd.Context())
 		}
 		return nil
 	}
@@ -265,6 +266,8 @@ Run 'learn-loop-example-pp-cli doctor' to verify auth and connectivity.`,
 	rootCmd.AddCommand(newLearningsCmd(flags, learnCfg))
 	rootCmd.AddCommand(newTeachPatternCmd(flags))
 	rootCmd.AddCommand(newTeachLookupCmd(flags))
+	rootCmd.AddCommand(newTeachPlaybookCmd(flags, learnCfg))
+	rootCmd.AddCommand(newPlaybookCmd(flags, learnCfg))
 
 	return rootCmd
 }
