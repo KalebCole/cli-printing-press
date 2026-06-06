@@ -10,7 +10,9 @@ MCP_APP="printing-press-golden-pp-mcp"
 PREFIX="PRINTING_PRESS_GOLDEN"
 AUTH_ENV="PRINTING_PRESS_GOLDEN_API_KEY"
 
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/printing-press-paths-smoke.XXXXXX")"
+TMP="${TMPDIR:-/tmp}"
+TMP="${TMP%/}"
+SCRATCH="$(mktemp -d "$TMP/printing-press-paths-smoke.XXXXXX")"
 SERVER_PID=""
 cleanup() {
   if [[ -n "$SERVER_PID" ]]; then
