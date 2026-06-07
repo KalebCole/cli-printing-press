@@ -22,7 +22,6 @@ import (
 	"github.com/mvanhorn/cli-printing-press/v4/internal/platform"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 	"github.com/spf13/cobra"
-	"golang.org/x/mod/modfile"
 )
 
 const (
@@ -390,6 +389,23 @@ func newPublishPackageCmd() *cobra.Command {
 				if err := os.Remove(filepath.Join(outCLIDir, name)); err != nil && !os.IsNotExist(err) {
 					cleanupOnFailure()
 					return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("stripping staged binary %s: %w", name, err)}
+				}
+			}
+			testBinaries, err := filepath.Glob(filepath.Join(outCLIDir, "*.test"))
+			if err != nil {
+				cleanupOnFailure()
+				return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("finding staged test binaries: %w", err)}
+			}
+			for _, path := range testBinaries {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					cleanupOnFailure()
+					return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("stripping staged test binary %s: %w", filepath.Base(path), err)}
+				}
+			}
+			for _, name := range stagedShipcheckReportNames() {
+				if err := os.Remove(filepath.Join(outCLIDir, name)); err != nil && !os.IsNotExist(err) {
+					cleanupOnFailure()
+					return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("stripping staged shipcheck report %s: %w", name, err)}
 				}
 			}
 
@@ -1217,26 +1233,8 @@ func runGoVulnCheck(dir string) CheckResult {
 	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
 		return CheckResult{Name: govulncheck.Name, Passed: false, Error: "go.mod not found"}
 	}
-	env := govulncheckToolchainEnv(dir)
+	env := govulncheck.ToolchainEnv(dir)
 	return runGoCommandCheckWithEnv(dir, govulncheck.Name, vulnCheckTimeout, env, govulncheck.GoRunArgs("./...")...)
-}
-
-func govulncheckToolchainEnv(dir string) []string {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-	if err != nil {
-		return nil
-	}
-	mod, err := modfile.Parse("go.mod", data, nil)
-	if err != nil {
-		return nil
-	}
-	if mod.Toolchain != nil && mod.Toolchain.Name != "" {
-		return []string{"GOTOOLCHAIN=" + mod.Toolchain.Name}
-	}
-	if mod.Go != nil && strings.Count(mod.Go.Version, ".") >= 2 {
-		return []string{"GOTOOLCHAIN=go" + mod.Go.Version}
-	}
-	return nil
 }
 
 func checkGoModTidy(dir string) CheckResult {
@@ -1358,6 +1356,10 @@ func stagedBinaryNames(cliName, apiSlug string) []string {
 		add(apiSlug + "-pp-mcp")
 	}
 	return names
+}
+
+func stagedShipcheckReportNames() []string {
+	return []string{"dogfood-results.json", "workflow-verify-report.json"}
 }
 
 type fileSnapshot struct {

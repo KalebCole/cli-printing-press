@@ -614,20 +614,6 @@ exit 42
 	assert.NotContains(t, string(calls), "verbose")
 }
 
-func TestGovulncheckToolchainEnvPrefersToolchainDirective(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.25.0\ntoolchain go1.26.4\n"), 0o644))
-
-	assert.Equal(t, []string{"GOTOOLCHAIN=go1.26.4"}, govulncheckToolchainEnv(dir))
-}
-
-func TestGovulncheckToolchainEnvIgnoresLanguageOnlyGoDirective(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.24\n"), 0o644))
-
-	assert.Nil(t, govulncheckToolchainEnv(dir))
-}
-
 func TestPublishPackageMissingDirFlag(t *testing.T) {
 	cmd := newPublishCmd()
 	cmd.SetArgs([]string{"package", "--json"})
@@ -905,9 +891,11 @@ func TestPublishPackageStripsRootBinaries(t *testing.T) {
 		"test",        // phantom bare-slug binary
 		"test-pp-cli", // primary CLI binary
 		"test-pp-mcp", // MCP peer binary (now covered by both code-level strip and skill cleanup)
+		"cli.test",    // compiled `go test -c` binary
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(cliDir, name), []byte("\x7fELF"), 0o755))
 	}
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "root_test.go"), []byte("package main\n"), 0o644))
 
 	target := filepath.Join(t.TempDir(), "staging")
 	cmd := newPublishCmd()
@@ -920,16 +908,46 @@ func TestPublishPackageStripsRootBinaries(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &result))
 
 	// Source binaries stay — we don't mutate the operator's working tree.
-	for _, name := range []string{"test", "test-pp-cli", "test-pp-mcp"} {
+	for _, name := range []string{"test", "test-pp-cli", "test-pp-mcp", "cli.test", "root_test.go"} {
 		_, srcErr := os.Stat(filepath.Join(cliDir, name))
-		assert.NoError(t, srcErr, "package must not delete source-tree binary %s", name)
+		assert.NoError(t, srcErr, "package must not delete source-tree file %s", name)
 	}
 
 	// Staged tree must have none of them.
-	for _, name := range []string{"test", "test-pp-cli", "test-pp-mcp"} {
+	for _, name := range []string{"test", "test-pp-cli", "test-pp-mcp", "cli.test"} {
 		_, stagedErr := os.Stat(filepath.Join(result.StagedDir, name))
 		assert.ErrorIs(t, stagedErr, os.ErrNotExist, "staged dir must not include root-level binary %s", name)
 	}
+	require.FileExists(t, filepath.Join(result.StagedDir, "root_test.go"), "staged dir should keep Go test source files")
+}
+
+func TestPublishPackageStripsRootShipcheckReports(t *testing.T) {
+	home := setLibraryTestEnv(t)
+	cliDir := filepath.Join(home, "library", "test-pp-cli")
+	writePublishableTestCLI(t, cliDir)
+
+	for _, name := range stagedShipcheckReportNames() {
+		require.NoError(t, os.WriteFile(filepath.Join(cliDir, name), []byte(`{"passed":true}`+"\n"), 0o644))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "config.json"), []byte(`{"name":"test"}`+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "internal", "cli", "extra.go"), []byte("package cli\n"), 0o644))
+
+	target := filepath.Join(t.TempDir(), "staging")
+	cmd := newPublishCmd()
+	cmd.SetArgs([]string{"package", "--dir", cliDir, "--category", "other", "--target", target, "--json"})
+
+	output, err := runWithCapturedStdout(t, cmd.Execute)
+	require.NoError(t, err)
+
+	var result PackageResult
+	require.NoError(t, json.Unmarshal([]byte(output), &result))
+
+	for _, name := range stagedShipcheckReportNames() {
+		assert.FileExists(t, filepath.Join(cliDir, name), "package must not delete source-tree shipcheck report %s", name)
+		assert.NoFileExists(t, filepath.Join(result.StagedDir, name), "staged dir must not include root-level shipcheck report %s", name)
+	}
+	assert.FileExists(t, filepath.Join(result.StagedDir, "config.json"), "legitimate root JSON source should remain staged")
+	assert.FileExists(t, filepath.Join(result.StagedDir, "internal", "cli", "extra.go"), "legitimate Go source should remain staged")
 }
 
 func TestStagedBinaryNamesDeduplicates(t *testing.T) {

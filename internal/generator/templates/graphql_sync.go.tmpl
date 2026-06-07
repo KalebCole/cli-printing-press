@@ -44,9 +44,11 @@ func newSyncCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync API data to local SQLite for offline search and analysis",
-		Long: `Sync data from the API into a local SQLite database. Supports resumable
+	Long: `Sync data from the API into a local SQLite database. Supports resumable
 incremental sync (only fetches new data since last sync) and full resync.
+{{- if .VisionSet.Search}}
 Once synced, use the 'search' command for instant full-text search.
+{{- end}}
 
 Exit codes & warnings:
   Resources the API denies access to (HTTP 403, HTTP 400 with an
@@ -314,13 +316,12 @@ func syncResource(ctx context.Context, c *client.Client, db *store.Store, resour
 		if err != nil {
 			if w, ok := isSyncAccessWarning(err); ok {
 				if !humanFriendly {
-					fmt.Fprintf(os.Stderr, `{"event":"sync_warning","resource":"%s","status":%d,"reason":"%s","message":"%s"}`+"\n",
-						resource, w.Status, w.Reason, strings.ReplaceAll(w.Message, `"`, `\"`))
+					fmt.Fprintln(os.Stderr, syncWarningJSON(resource, "", w.Status, w.Reason, w.Message))
 				}
 				return syncResult{Resource: resource, Count: totalCount, Warn: fmt.Errorf("skipped %s: %s", resource, w.Reason), Duration: time.Since(started)}
 			}
 			if !humanFriendly {
-				fmt.Fprintf(os.Stderr, `{"event":"sync_error","resource":"%s","error":"%s"}`+"\n", resource, strings.ReplaceAll(err.Error(), `"`, `\"`))
+				fmt.Fprintln(os.Stderr, syncErrorJSON(resource, "", err))
 			}
 			return syncResult{Resource: resource, Count: totalCount, Err: fmt.Errorf("fetching %s: %w", resource, err), Duration: time.Since(started)}
 		}
@@ -366,7 +367,7 @@ func syncResource(ctx context.Context, c *client.Client, db *store.Store, resour
 		stored, extractFailures, err := db.UpsertBatch(resource, conn.Nodes)
 		if err != nil {
 			if !humanFriendly {
-				fmt.Fprintf(os.Stderr, `{"event":"sync_error","resource":"%s","error":"%s"}`+"\n", resource, strings.ReplaceAll(err.Error(), `"`, `\"`))
+				fmt.Fprintln(os.Stderr, syncErrorJSON(resource, "", err))
 			}
 			return syncResult{Resource: resource, Count: totalCount, Err: fmt.Errorf("upserting batch for %s: %w", resource, err), Duration: time.Since(started)}
 		}

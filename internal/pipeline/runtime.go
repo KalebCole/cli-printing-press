@@ -319,7 +319,7 @@ func RunVerify(cfg VerifyConfig) (*VerifyReport, error) {
 		report.DataPipeline = true
 		report.DataPipelineDetail = "SKIP (device CLI: no sync data pipeline)"
 	} else {
-		report.DataPipeline, report.DataPipelineDetail = runDataPipelineTest(binaryPath, report.Mode, buildEnv, expectedMockRows)
+		report.DataPipeline, report.DataPipelineDetail = runDataPipelineTest(binaryPath, cfg.Dir, report.Mode, buildEnv, expectedMockRows)
 	}
 	report.Freshness = runFreshnessContractTest(cfg.Dir)
 	report.PathParamProbes = runPathParamProbes(binaryPath, buildEnv(), paramDefaults)
@@ -610,7 +610,16 @@ func runBrowserSessionProofTest(binary string, auth apispec.AuthConfig) CommandR
 
 // runDataPipelineTest tests the sync -> sql -> search -> health chain.
 // Returns (pass bool, detail string) where detail gives PASS/WARN/SKIP/FAIL context.
-func runDataPipelineTest(binary, mode string, envFn func() []string, expectedRows int) (bool, string) {
+func runDataPipelineTest(binary, cliDir, mode string, envFn func() []string, expectedRows int) (bool, string) {
+	if strings.TrimSpace(cliDir) != "" {
+		if manifest, err := ReadCLIManifest(cliDir); err == nil && manifest.IsLocalDatastore() {
+			return true, "SKIP (local-datastore CLI: no network sync to verify)"
+		}
+		if !cliHasSyncCommand(cliDir) {
+			return true, "SKIP (CLI has no sync command)"
+		}
+	}
+
 	env := envFn()
 
 	// Create a temp dir for the test database
@@ -624,15 +633,22 @@ func runDataPipelineTest(binary, mode string, envFn func() []string, expectedRow
 	env = append(env, "HOME="+tmpDir) // so sync uses temp location
 
 	// Test sync (if it exists)
+	var syncErrors []error
 	syncErr := runCLI(binary, []string{"sync", "--db", dbPath, "--resources", "repos", "--full"}, env, 30*time.Second)
 	if syncErr != nil {
+		syncErrors = append(syncErrors, syncErr)
 		syncErr = runCLI(binary, []string{"sync", "--db", dbPath, "--full"}, env, 30*time.Second)
 	}
 	if syncErr != nil {
+		syncErrors = append(syncErrors, syncErr)
 		// Sync might not accept --db flag - try without.
 		syncErr = runCLI(binary, []string{"sync", "--full"}, env, 30*time.Second)
 	}
 	if syncErr != nil {
+		syncErrors = append(syncErrors, syncErr)
+		if allSyncAttemptsWereUnknownCommand(syncErrors) {
+			return true, "WARN: no sync command — data-pipeline check skipped"
+		}
 		return false, "FAIL: sync crashed"
 	}
 
@@ -640,7 +656,7 @@ func runDataPipelineTest(binary, mode string, envFn func() []string, expectedRow
 	_ = runCLI(binary, []string{"health", "--db", dbPath}, env, 10*time.Second)
 
 	tableQuery := `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite%' AND name NOT LIKE '%_fts%' AND name != 'sync_state'`
-	tablesOut, sqlErr := runCLIWithOutput(binary, []string{"sql", tableQuery}, env, 10*time.Second)
+	tablesOut, sqlErr := runCLIWithOutput(binary, []string{"sql", "--db", dbPath, tableQuery}, env, 10*time.Second)
 	if sqlErr != nil {
 		return true, "PASS: sync completed (sql unavailable, table validation skipped)"
 	}
@@ -660,7 +676,7 @@ func runDataPipelineTest(binary, mode string, envFn func() []string, expectedRow
 	var zeroDataTable string
 	for _, table := range tables {
 		countQuery := fmt.Sprintf("SELECT count(*) FROM \"%s\"", table)
-		countOut, countErr := runCLIWithOutput(binary, []string{"sql", countQuery}, env, 10*time.Second)
+		countOut, countErr := runCLIWithOutput(binary, []string{"sql", "--db", dbPath, countQuery}, env, 10*time.Second)
 		if countErr != nil {
 			continue
 		}
@@ -696,6 +712,27 @@ func runDataPipelineTest(binary, mode string, envFn func() []string, expectedRow
 		return false, fmt.Sprintf("FAIL: %s has 0 rows after sync, expected at least %d (%s mode)", zeroDataTable, expectedRows, mode)
 	}
 	return false, fmt.Sprintf("FAIL: %d domain tables created but 0 rows after sync (%s mode)", len(tables), mode)
+}
+
+func allSyncAttemptsWereUnknownCommand(errs []error) bool {
+	if len(errs) == 0 {
+		return false
+	}
+	for _, err := range errs {
+		if err == nil || !isUnknownSyncCommandError(err) {
+			return false
+		}
+	}
+	return true
+}
+
+func isUnknownSyncCommandError(err error) bool {
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "unknown command \"sync\"")
+}
+
+func cliHasSyncCommand(cliDir string) bool {
+	return hasRegisteredCommandFileWithPrefix(filepath.Join(cliDir, "internal", "cli"), "sync")
 }
 
 func isAuxiliaryPipelineTable(table string, totalTables int) bool {

@@ -64,7 +64,7 @@ func RegisterTools(s *server.MCPServer) {
 			mcplib.WithDestructiveHintAnnotation(false),
 			mcplib.WithOpenWorldHintAnnotation(true),
 		),
-		makeAPIHandler("GET", "/projects", true, false, nil, []mcpParamBinding{{PublicName: "status", WireName: "status", Location: "query"}, {PublicName: "limit", WireName: "limit", Location: "query"}, {PublicName: "cursor", WireName: "cursor", Location: "query"}}, []string{}),
+		makeAPIHandler("GET", "/projects", true, false, nil, []mcpParamBinding{{PublicName: "status", WireName: "status", Location: "query"}, {PublicName: "limit", WireName: "limit", Location: "query", Default: "25"}, {PublicName: "cursor", WireName: "cursor", Location: "query"}}, []string{}),
 	)
 	s.AddTool(
 		mcplib.NewTool("projects_avatar_upload-project",
@@ -88,7 +88,7 @@ func RegisterTools(s *server.MCPServer) {
 			mcplib.WithDestructiveHintAnnotation(false),
 			mcplib.WithOpenWorldHintAnnotation(true),
 		),
-		makeAPIHandler("GET", "/projects/{projectId}/tasks", true, false, nil, []mcpParamBinding{{PublicName: "projectId", WireName: "projectId", Location: "path"}, {PublicName: "priority", WireName: "priority", Location: "query"}, {PublicName: "limit", WireName: "limit", Location: "query"}, {PublicName: "cursor", WireName: "cursor", Location: "query"}}, []string{"projectId"}),
+		makeAPIHandler("GET", "/projects/{projectId}/tasks", true, false, nil, []mcpParamBinding{{PublicName: "projectId", WireName: "projectId", Location: "path"}, {PublicName: "priority", WireName: "priority", Location: "query"}, {PublicName: "limit", WireName: "limit", Location: "query", Default: "50"}, {PublicName: "cursor", WireName: "cursor", Location: "query"}}, []string{"projectId"}),
 	)
 	s.AddTool(
 		mcplib.NewTool("projects_tasks_update-project",
@@ -147,7 +147,7 @@ func RegisterTools(s *server.MCPServer) {
 	s.AddTool(
 		mcplib.NewTool("sql",
 			mcplib.WithDescription("Run read-only SQL against local database. Use for ad-hoc analysis, aggregations, and joins across synced resources. Requires sync first."),
-			mcplib.WithString("query", mcplib.Required(), mcplib.Description("SQL query (SELECT or WITH...SELECT). Tables match resource names.")),
+			mcplib.WithString("query", mcplib.Required(), mcplib.Description("SQL query (SELECT or WITH...SELECT). Synced records live in resources(resource_type, id, data); filter by resource_type and use json_extract on data, e.g. SELECT json_extract(data,'$.name') FROM resources WHERE resource_type='items'.")),
 			mcplib.WithReadOnlyHintAnnotation(true),
 			mcplib.WithDestructiveHintAnnotation(false),
 		),
@@ -176,6 +176,7 @@ type mcpParamBinding struct {
 	Location           string
 	Format             string
 	RequestContentType string
+	Default            string
 }
 
 func mcpMultipartFieldValue(v any) string {
@@ -232,7 +233,11 @@ func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse b
 			}
 			v, ok := args[binding.PublicName]
 			if !ok {
-				continue
+				if binding.Default != "" {
+					v = binding.Default
+				} else {
+					continue
+				}
 			}
 			switch binding.Location {
 			case "path":
