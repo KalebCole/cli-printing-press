@@ -25,7 +25,11 @@ type Config struct {
 	// config from ("config-kind path" or "legacy config path") so the
 	// credential-source fallback below reports where config-stored
 	// credentials actually live. Unexported: never persisted.
-	configOwner               string
+	configOwner string
+	// legacySourcePath records the legacy config path when Load fell
+	// back to it. Used by save() to scrub credential fields from the
+	// old location after relocation. Unexported: never persisted.
+	legacySourcePath          string
 	AccessToken               string    `toml:"access_token"`
 	RefreshToken              string    `toml:"refresh_token"`
 	TokenExpiry               time.Time `toml:"token_expiry"`
@@ -75,6 +79,9 @@ func Load(configPath string) (*Config, error) {
 				}
 			} else {
 				*cfg = parsed
+				if sourcePath == legacyPath {
+					cfg.legacySourcePath = legacyPath
+				}
 			}
 		}
 	}
@@ -365,7 +372,41 @@ func (c *Config) save() error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return cliutil.AtomicWritePrivateFile(c.Path, data, 0o600, 0o700)
+	if err := cliutil.AtomicWritePrivateFile(c.Path, data, 0o600, 0o700); err != nil {
+		return err
+	}
+	c.scrubLegacyCredentials()
+	return nil
+}
+func (c *Config) scrubLegacyCredentials() {
+	if c.legacySourcePath == "" || c.legacySourcePath == c.Path {
+		return
+	}
+	if c.AgentcookieManagedByExternalStore() {
+		return
+	}
+	data, err := os.ReadFile(c.legacySourcePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "warning: cannot read legacy config to scrub credentials: %v\n", err)
+		}
+		return
+	}
+	var legacy Config
+	if err := toml.Unmarshal(data, &legacy); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot parse legacy config to scrub credentials: %v\n", err)
+		return
+	}
+	legacy.clearCredentialFields()
+	scrubbed := legacy.persisted()
+	scrubbedData, err := toml.Marshal(scrubbed)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot marshal scrubbed legacy config: %v\n", err)
+		return
+	}
+	if err := cliutil.AtomicWritePrivateFile(c.legacySourcePath, scrubbedData, 0o600, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot write scrubbed legacy config: %v\n", err)
+	}
 }
 
 type persistedConfig struct {

@@ -168,8 +168,8 @@ PY
 assert_no_config_secrets() {
   local config_path="$1"
   python3 - "$config_path" <<'PY'
+import re
 import sys
-import tomllib
 
 secret_keys = {
     "auth_header",
@@ -184,10 +184,17 @@ secret_keys = {
     "auth_user_token",
     "press_golden_api_key",
 }
-with open(sys.argv[1], "rb") as f:
-    data = tomllib.load(f)
-present = sorted(k for k in secret_keys if data.get(k))
-assert not present, present
+key_pattern = re.compile(r"^(" + "|".join(re.escape(k) for k in secret_keys) + r")\s*=")
+present = []
+with open(sys.argv[1], "r") as f:
+    for line in f:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        m = key_pattern.match(stripped)
+        if m:
+            present.append(m.group(1))
+assert not present, sorted(present)
 PY
 }
 

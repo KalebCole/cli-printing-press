@@ -40,6 +40,10 @@ type Config struct {
 	// credential-source fallback below reports where config-stored
 	// credentials actually live. Unexported: never persisted.
 	configOwner string
+	// legacySourcePath records the legacy config path when Load fell
+	// back to it. Used by save() to scrub credential fields from the
+	// old location after relocation. Unexported: never persisted.
+	legacySourcePath string
 {{- end}}
 {{- if .HasRequiredRoles}}
 	AuthRole       string `{{configTag .Config.Format}}:"auth_role,omitempty"`
@@ -134,6 +138,11 @@ func Load(configPath string) (*Config, error) {
 				}
 			} else {
 				*cfg = parsed
+{{- if .HasAuthCommand}}
+				if sourcePath == legacyPath {
+					cfg.legacySourcePath = legacyPath
+				}
+{{- end}}
 			}
 		}
 	}
@@ -945,15 +954,64 @@ func (c *Config) save() error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return cliutil.AtomicWritePrivateFile(c.Path, data, 0o600, 0o700)
+	if err := cliutil.AtomicWritePrivateFile(c.Path, data, 0o600, 0o700); err != nil {
+		return err
+	}
 {{- else}}
 	data, err := json.MarshalIndent(persist, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return cliutil.AtomicWritePrivateFile(c.Path, data, 0o600, 0o700)
+	if err := cliutil.AtomicWritePrivateFile(c.Path, data, 0o600, 0o700); err != nil {
+		return err
+	}
 {{- end}}
+{{- if .HasAuthCommand}}
+	c.scrubLegacyCredentials()
+{{- end}}
+	return nil
 }
+
+{{- if .HasAuthCommand}}
+func (c *Config) scrubLegacyCredentials() {
+	if c.legacySourcePath == "" || c.legacySourcePath == c.Path {
+		return
+	}
+	if c.AgentcookieManagedByExternalStore() {
+		return
+	}
+	data, err := os.ReadFile(c.legacySourcePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "warning: cannot read legacy config to scrub credentials: %v\n", err)
+		}
+		return
+	}
+	var legacy Config
+{{- if eq .Config.Format "toml"}}
+	if err := toml.Unmarshal(data, &legacy); err != nil {
+{{- else}}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+{{- end}}
+		fmt.Fprintf(os.Stderr, "warning: cannot parse legacy config to scrub credentials: %v\n", err)
+		return
+	}
+	legacy.clearCredentialFields()
+	scrubbed := legacy.persisted()
+{{- if eq .Config.Format "toml"}}
+	scrubbedData, err := toml.Marshal(scrubbed)
+{{- else}}
+	scrubbedData, err := json.MarshalIndent(scrubbed, "", "  ")
+{{- end}}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot marshal scrubbed legacy config: %v\n", err)
+		return
+	}
+	if err := cliutil.AtomicWritePrivateFile(c.legacySourcePath, scrubbedData, 0o600, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot write scrubbed legacy config: %v\n", err)
+	}
+}
+{{- end}}
 
 {{- if .HasAuthCommand}}
 type persistedConfig struct {

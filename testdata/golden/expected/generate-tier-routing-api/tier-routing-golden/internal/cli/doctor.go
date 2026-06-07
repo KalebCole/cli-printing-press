@@ -514,17 +514,25 @@ func collectCredentialsLocationReport(report map[string]any, cfg *config.Config)
 	if err == nil && credsPresent {
 		locations = append(locations, "credentials file")
 	}
+	legacySecretsElsewhere := ""
 	for _, path := range legacyCredentialProbePaths(cfg) {
 		ok, err := config.FileHasCredentialFields(path)
 		if err == nil && ok {
 			locations = append(locations, path)
+			if path != cfg.Path {
+				legacySecretsElsewhere = path
+			}
 		}
 	}
 	if len(locations) > 0 {
 		report["credentials_locations"] = locations
 	}
 	if credsPresent && len(locations) > 1 {
-		report["credentials_location_warning"] = "WARN credentials stored in more than one location; current reads use credentials file; run auth set-token or auth logout to consolidate"
+		if legacySecretsElsewhere != "" {
+			report["credentials_location_warning"] = "WARN credentials stored in more than one location; legacy secrets remain at " + legacySecretsElsewhere + "; run auth set-token or auth logout to consolidate and remove legacy secrets"
+		} else {
+			report["credentials_location_warning"] = "WARN credentials stored in more than one location; current reads use credentials file; run auth set-token or auth logout to consolidate"
+		}
 	}
 }
 
