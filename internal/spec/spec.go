@@ -57,6 +57,10 @@ const (
 )
 
 const (
+	SourceLocalSQLite = "local-sqlite"
+)
+
+const (
 	StreamingTransportWebSocket = "websocket"
 
 	StreamingFramingSingleObject = "single_object_per_frame"
@@ -284,6 +288,7 @@ type APISpec struct {
 	Printer         string              `yaml:"printer,omitempty" json:"printer,omitempty"`               // legacy: @handle, derived from Creator.Handle
 	PrinterName     string              `yaml:"printer_name,omitempty" json:"printer_name,omitempty"`     // legacy: display, derived from Creator.Name
 	Kind            string              `yaml:"kind,omitempty" json:"kind,omitempty"`                     // "rest" (default) or "synthetic" — synthetic CLIs aggregate multiple sources beyond the spec; dogfood's path-validity check is relaxed accordingly
+	Source          string              `yaml:"source,omitempty" json:"source,omitempty"`                 // source archetype; local-sqlite declares an operator-local SQLite source with no HTTP base URL
 	SpecSource      string              `yaml:"spec_source,omitempty" json:"spec_source,omitempty"`       // official, community, sniffed, docs — affects generated client defaults
 	ClientPattern   string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"` // rest (default), proxy-envelope — affects generated HTTP client
 	HTTPTransport   string              `yaml:"http_transport,omitempty" json:"http_transport,omitempty"` // standard (default for official APIs), browser-http, browser-chrome, browser-chrome-h2, or browser-chrome-h3
@@ -785,6 +790,12 @@ type ExtraCommand struct {
 // strict path-validity and scorecard marks path_validity as unscored.
 func (s *APISpec) IsSynthetic() bool {
 	return s != nil && s.Kind == KindSynthetic
+}
+
+// IsLocalSQLiteSource reports whether the root spec declares an operator-local
+// SQLite data source rather than an HTTP API origin.
+func (s *APISpec) IsLocalSQLiteSource() bool {
+	return s != nil && strings.ToLower(strings.TrimSpace(s.Source)) == SourceLocalSQLite
 }
 
 // EffectiveDisplayName returns the human-readable brand name for this CLI.
@@ -2175,6 +2186,7 @@ type Param struct {
 	PathParam   bool     `yaml:"path_param,omitempty" json:"path_param,omitempty"` // true for path params rendered as flags (e.g., pagination)
 	GlobalScope bool     `yaml:"global_scope,omitempty" json:"global_scope,omitempty"`
 	Default     any      `yaml:"default" json:"default"`
+	Example     any      `yaml:"example,omitempty" json:"example,omitempty"`
 	Description string   `yaml:"description" json:"description"`
 	Fields      []Param  `yaml:"fields" json:"fields"`                     // for nested objects
 	Enum        []string `yaml:"enum,omitempty" json:"enum,omitempty"`     // enum constraints for the parameter
@@ -2469,6 +2481,12 @@ func bodyParamFromSchemaNode(name string, node *yaml.Node) (Param, error) {
 		Description: schemaDescriptionFromNode(node, name),
 		Enum:        schemaStringSlice(yamlMappingValue(node, "enum")),
 		Format:      strings.TrimSpace(schemaScalarValue(yamlMappingValue(node, "format"))),
+	}
+	if exampleNode := yamlMappingValue(node, "example"); exampleNode != nil {
+		var exampleValue any
+		if err := exampleNode.Decode(&exampleValue); err == nil {
+			param.Example = exampleValue
+		}
 	}
 	if required := yamlMappingValue(node, "required"); required != nil && required.Kind == yaml.ScalarNode {
 		var requiredBool bool
@@ -3597,8 +3615,13 @@ func (s *APISpec) Validate() error {
 	// Note: s.Version holds the API version from the spec (for provenance).
 	// The CLI version is always hardcoded to "1.0.0" in the generated root.go
 	// template — it is independent of the API version.
+	switch strings.ToLower(strings.TrimSpace(s.Source)) {
+	case "", SourceLocalSQLite:
+	default:
+		return fmt.Errorf("source %q is not supported; valid values: local-sqlite", s.Source)
+	}
 	// Parser fallback may supply a placeholder base_url when the source spec omits servers.
-	if s.BaseURL == "" && s.BasePath == "" {
+	if s.BaseURL == "" && s.BasePath == "" && !s.IsLocalSQLiteSource() {
 		return fmt.Errorf("base_url is required")
 	}
 	if err := validateReservedPlaceholderHost("base_url", s.BaseURL); err != nil {

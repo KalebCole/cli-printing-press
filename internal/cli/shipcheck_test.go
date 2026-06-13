@@ -36,6 +36,23 @@ func fakeCLIDir(t *testing.T) string {
 	return dir
 }
 
+func writeHTMLSyncStubMarker(t *testing.T, dir string) {
+	t.Helper()
+	syncDir := filepath.Join(dir, "internal", "cli")
+	if err := os.MkdirAll(syncDir, 0o755); err != nil {
+		t.Fatalf("creating sync dir: %v", err)
+	}
+	syncSrc := `package cli
+
+func syncStubMarker() string {
+	return "sync is not implemented for this CLI; write internal/cli/sync_example.go because the generic spec-driven sync template does not fit predominantly HTML page-mode endpoints"
+}
+`
+	if err := os.WriteFile(filepath.Join(syncDir, "sync.go"), []byte(syncSrc), 0o644); err != nil {
+		t.Fatalf("writing sync stub marker: %v", err)
+	}
+}
+
 // withStubBinary swaps resolveSelfBinary for the duration of a test so
 // the umbrella spawns the stub instead of the real printing-press
 // binary. Returns a cleanup function callers must defer.
@@ -199,8 +216,8 @@ func TestShipcheck_AllLegsPass(t *testing.T) {
 		t.Fatalf("expected %d leg invocations; got %d: %v", len(shipcheckLegs), len(invocations), invocations)
 	}
 
-	// Confirm canonical order: verify, validate-narrative, dogfood, workflow-verify, verify-skill, scorecard.
-	wantOrder := []string{"verify", "validate-narrative", "dogfood", "workflow-verify", "verify-skill", "scorecard"}
+	// Confirm canonical order: verify, validate-narrative, dogfood, workflow-verify, apify-audit, verify-skill, scorecard.
+	wantOrder := []string{"verify", "validate-narrative", "dogfood", "workflow-verify", "apify-audit", "verify-skill", "scorecard"}
 	for i, want := range wantOrder {
 		// argv[0] is the stub binary path; argv[1] is the leg name.
 		if len(invocations[i]) < 2 {
@@ -213,7 +230,7 @@ func TestShipcheck_AllLegsPass(t *testing.T) {
 }
 
 // TestShipcheck_OneLegFails: verify-skill exits 1, umbrella returns
-// ExitError with code 1; all six legs still ran (no fail-fast).
+// ExitError with code 1; all legs still ran (no fail-fast).
 func TestShipcheck_OneLegFails(t *testing.T) {
 	h := newShipcheckHarness(t)
 	t.Setenv("STUB_EXIT_VERIFY_SKILL", "1")
@@ -325,6 +342,9 @@ func TestShipcheck_PassesSpecAndResearchDir(t *testing.T) {
 	if !argvHas(verifyArgs, "--spec") || !argvHas(verifyArgs, specPath) {
 		t.Errorf("verify argv missing --spec: %v", verifyArgs)
 	}
+	if argvHas(verifyArgs, "--no-spec") {
+		t.Errorf("spec-driven verify argv should not include --no-spec: %v", verifyArgs)
+	}
 
 	scorecardArgs := findInvocation(invocations, "scorecard")
 	if !argvHas(scorecardArgs, "--spec") || !argvHas(scorecardArgs, specPath) {
@@ -332,6 +352,11 @@ func TestShipcheck_PassesSpecAndResearchDir(t *testing.T) {
 	}
 	if !argvHas(scorecardArgs, "--research-dir") || !argvHas(scorecardArgs, researchDir) {
 		t.Errorf("scorecard argv missing --research-dir: %v", scorecardArgs)
+	}
+
+	apifyArgs := findInvocation(invocations, "apify-audit")
+	if !argvHas(apifyArgs, "--research-dir") || !argvHas(apifyArgs, researchDir) {
+		t.Errorf("apify-audit argv missing --research-dir: %v", apifyArgs)
 	}
 
 	// workflow-verify, verify-skill, and validate-narrative don't take --spec or --research-dir;
@@ -344,6 +369,56 @@ func TestShipcheck_PassesSpecAndResearchDir(t *testing.T) {
 		if argvHas(args, "--research-dir") {
 			t.Errorf("%s should not receive --research-dir; got %v", leg, args)
 		}
+	}
+}
+
+func TestShipcheck_HTMLSyncStubUsesNoSpecForVerify(t *testing.T) {
+	h := newShipcheckHarness(t)
+	writeHTMLSyncStubMarker(t, h.dir)
+
+	specPath := "/some/spec.yaml"
+	if err := runShipcheckCmd(t, "--dir", h.dir, "--spec", specPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	invocations := readStubLog(t, h.logFile)
+
+	verifyArgs := findInvocation(invocations, "verify")
+	if !argvHas(verifyArgs, "--no-spec") {
+		t.Errorf("HTML sync-stub verify argv missing --no-spec: %v", verifyArgs)
+	}
+	if argvHas(verifyArgs, "--spec") || argvHas(verifyArgs, specPath) {
+		t.Errorf("HTML sync-stub verify argv should not receive --spec: %v", verifyArgs)
+	}
+	if !argvHas(verifyArgs, "--fix") {
+		t.Errorf("HTML sync-stub verify argv should preserve default --fix: %v", verifyArgs)
+	}
+
+	for _, leg := range []string{"dogfood", "scorecard"} {
+		args := findInvocation(invocations, leg)
+		if !argvHas(args, "--spec") || !argvHas(args, specPath) {
+			t.Errorf("%s argv should still receive --spec; got %v", leg, args)
+		}
+		if argvHas(args, "--no-spec") {
+			t.Errorf("%s argv should not receive --no-spec; got %v", leg, args)
+		}
+	}
+}
+
+func TestShipcheck_HTMLSyncStubWithoutSpecDoesNotPassSpecFlag(t *testing.T) {
+	h := newShipcheckHarness(t)
+	writeHTMLSyncStubMarker(t, h.dir)
+
+	if err := runShipcheckCmd(t, "--dir", h.dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	verifyArgs := findInvocation(readStubLog(t, h.logFile), "verify")
+	if argvHas(verifyArgs, "--no-spec") {
+		t.Errorf("HTML sync-stub verify argv without --spec should not receive --no-spec: %v", verifyArgs)
+	}
+	if argvHas(verifyArgs, "--spec") {
+		t.Errorf("HTML sync-stub verify argv without --spec should not receive --spec: %v", verifyArgs)
 	}
 }
 
@@ -486,7 +561,7 @@ func TestShipcheck_PassesAuthFlagsToVerify(t *testing.T) {
 	}
 
 	// Other legs must NOT receive these flags — they don't accept them.
-	for _, leg := range []string{"dogfood", "workflow-verify", "verify-skill", "scorecard"} {
+	for _, leg := range []string{"dogfood", "workflow-verify", "apify-audit", "verify-skill", "scorecard"} {
 		args := findInvocation(invocations, leg)
 		if argvHas(args, "--api-key") {
 			t.Errorf("%s argv should not include --api-key; got %v", leg, args)
@@ -511,7 +586,7 @@ func TestShipcheck_StrictPassesToVerifySkill(t *testing.T) {
 	if !argvHas(vsArgs, "--strict") {
 		t.Errorf("verify-skill argv missing --strict: %v", vsArgs)
 	}
-	for _, leg := range []string{"dogfood", "verify", "workflow-verify", "scorecard"} {
+	for _, leg := range []string{"dogfood", "verify", "workflow-verify", "apify-audit", "scorecard"} {
 		args := findInvocation(invocations, leg)
 		if argvHas(args, "--strict") {
 			t.Errorf("%s argv should not include --strict; got %v", leg, args)

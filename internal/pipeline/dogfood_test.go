@@ -44,6 +44,7 @@ func configure(flags *rootFlags) {
 	writeTestFile(t, filepath.Join(dir, "internal", "cli", "helpers.go"), `package cli
 func usedHelper() {}
 func deadHelper() {}
+func boundCtx() {}
 `)
 	writeTestFile(t, filepath.Join(dir, "internal", "cli", "users_list.go"), `package cli
 func usersList() {
@@ -783,6 +784,21 @@ func TestDeriveDogfoodVerdict(t *testing.T) {
 	assert.Equal(t, "PASS", deriveDogfoodVerdict(report, true))
 }
 
+func TestDeriveDogfoodVerdict_FailsOnMissingDataSourceStrategy(t *testing.T) {
+	report := passingDogfoodReport()
+	report.NovelFeaturesCheck = NovelFeaturesCheckResult{Planned: 1, Found: 1, Stubbed: []string{"id-hunt"}}
+	report.ReimplementationCheck = ReimplementationCheckResult{
+		Checked: 1,
+		MissingDataSourceStrategy: []ReimplementationFinding{{
+			Command: "id-hunt",
+			File:    "id_hunt.go",
+			Reason:  "missing // pp:data-source <auto|local|live> annotation",
+		}},
+	}
+
+	assert.Equal(t, "FAIL", deriveDogfoodVerdict(report, false))
+}
+
 func TestExtractExamplesSection(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1188,6 +1204,48 @@ func (c *Config) AuthHeader() string {
 	assert.Equal(t, "Bearer ", result.GeneratedFmt)
 }
 
+func TestCheckAuthRecognizesHeaderAPIKey(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "client"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "config"), 0o755))
+
+	writeTestFile(t, filepath.Join(dir, "internal", "client", "client.go"), `package client
+func (c *Client) do() {
+	authHeader := c.Config.AuthHeader()
+	req.Header.Set("x-api-key", authHeader)
+}
+`)
+	writeTestFile(t, filepath.Join(dir, "internal", "config", "config.go"), `package config
+func (c *Config) AuthHeader() string { return c.APIKey }
+`)
+
+	result := checkAuth(dir, apispec.AuthConfig{Type: "api_key", In: "header", Header: "x-api-key", Scheme: "ApiKeyAuth"})
+	assert.True(t, result.Match)
+	assert.Equal(t, "x-api-key", result.GeneratedFmt)
+	assert.Contains(t, result.SpecScheme, "x-api-key")
+}
+
+func TestCheckAuthRecognizesHeaderAPIKeyFromChainedAuthHeaderCall(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "client"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "config"), 0o755))
+
+	writeTestFile(t, filepath.Join(dir, "internal", "client", "client.go"), `package client
+func (c *Client) do() {
+	req.Header.Set("x-api-key", c.GetConfig().AuthHeader())
+}
+`)
+	writeTestFile(t, filepath.Join(dir, "internal", "config", "config.go"), `package config
+func (c *Config) AuthHeader() string { return c.APIKey }
+`)
+
+	result := checkAuth(dir, apispec.AuthConfig{Type: "api_key", In: "header", Header: "x-api-key", Scheme: "ApiKeyAuth"})
+	assert.True(t, result.Match)
+	assert.Equal(t, "x-api-key", result.GeneratedFmt)
+}
+
 func TestCheckAuthRejectsBearerApplyAuthFormatWithoutTokenPlaceholder(t *testing.T) {
 	dir := t.TempDir()
 
@@ -1396,6 +1454,47 @@ func (c *Config) AuthHeader() string {
 	result := checkAuth(dir, apispec.AuthConfig{Type: "api_key", Format: "Basic {username}:{password}"})
 	assert.True(t, result.Match)
 	assert.Equal(t, "Basic ", result.GeneratedFmt)
+}
+
+func TestLoadDogfoodOpenAPISpecUsesAuthPreference(t *testing.T) {
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "openapi.yaml")
+	writeTestFile(t, specPath, `openapi: 3.0.0
+info:
+  title: Multi Auth
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: ok
+`)
+
+	defaultSpec, err := loadDogfoodOpenAPISpec(specPath, "")
+	require.NoError(t, err)
+	require.Equal(t, "bearer_token", defaultSpec.Auth.Type)
+
+	preferred, err := loadDogfoodOpenAPISpec(specPath, "ApiKeyAuth")
+	require.NoError(t, err)
+	assert.Equal(t, "api_key", preferred.Auth.Type)
+	assert.Equal(t, "ApiKeyAuth", preferred.Auth.Scheme)
+	assert.Equal(t, "x-api-key", preferred.Auth.Header)
 }
 
 func TestDeriveDogfoodVerdict_WiringChecks(t *testing.T) {
@@ -3372,6 +3471,22 @@ func TestCollectDogfoodIssues_IncludesNovelFeatureStubs(t *testing.T) {
 
 	issues := collectDogfoodIssues(report, false)
 	assert.Contains(t, issues, "1/2 novel features are TODO stubs: call")
+}
+
+func TestCollectDogfoodIssues_IncludesMissingDataSourceStrategy(t *testing.T) {
+	report := &DogfoodReport{
+		ReimplementationCheck: ReimplementationCheckResult{
+			Checked: 2,
+			MissingDataSourceStrategy: []ReimplementationFinding{{
+				Command: "id-hunt",
+				File:    "id_hunt.go",
+				Reason:  "missing // pp:data-source <auto|local|live> annotation",
+			}},
+		},
+	}
+
+	issues := collectDogfoodIssues(report, false)
+	assert.Contains(t, issues, "1/2 novel features missing data-source strategy: id-hunt (id_hunt.go) — missing // pp:data-source <auto|local|live> annotation")
 }
 
 func TestDeriveDogfoodVerdict_FailsOnMissingTests(t *testing.T) {

@@ -123,6 +123,10 @@ type SyncableResource struct {
 	// those resources and emits one resource_not_incremental warning per
 	// run when --since/incremental sync was requested.
 	SinceParam string
+	// SinceParamFormat mirrors the OpenAPI format hint for SinceParam. The
+	// sync template uses "date" to send YYYY-MM-DD values instead of RFC3339
+	// timestamps to date-only endpoints.
+	SinceParamFormat string
 
 	// SupportsPagination is true when the chosen list endpoint declares a
 	// cursor or page-size parameter. The sync template uses this to avoid
@@ -183,7 +187,8 @@ type DependentResource struct {
 	// SinceParam mirrors SyncableResource.SinceParam for child paths so
 	// the same per-resource temporal-filter gating applies to dependent
 	// syncs.
-	SinceParam string
+	SinceParam       string
+	SinceParamFormat string
 
 	// SupportsPagination mirrors SyncableResource.SupportsPagination for child
 	// paths so dependent syncs skip synthetic limit/offset params on endpoints
@@ -449,19 +454,19 @@ func Profile(s *spec.APISpec) *APIProfile {
 					// entity type that should sync independently. Example:
 					// GET /v1/api/networkentity?entityType=collection|workspace|api|flow
 					// → sync resources: collection, workspace, api, flow
-					if enumParam := findEntityTypeEnum(endpoint); enumParam != nil && len(enumParam.Enum) >= 2 {
-						addSyncCandidate(resourceName, metaFromEndpoint(s, r, endpoint, s.Types, resourceNameIndex))
+					if enumParam := findEntityTypeEnum(endpoint); standaloneList && enumParam != nil && len(enumParam.Enum) >= 2 {
+						addSyncCandidate(resourceName, metaFromEndpoint(s, resourceName, r, endpoint, s.Types, resourceNameIndex))
 						for _, val := range enumParam.Enum {
 							expandedName := strings.ToLower(val)
 							expandedPath := endpoint.Path + "?" + enumParam.Name + "=" + val
 							// Enum-expanded paths are more specific than generic resource
 							// paths, so they always win on name collision. This ensures
 							// deterministic output regardless of Go map iteration order.
-							meta := metaFromEndpoint(s, r, endpoint, s.Types, resourceNameIndex)
+							meta := metaFromEndpoint(s, resourceName, r, endpoint, s.Types, resourceNameIndex)
 							meta.Path = expandedPath
 							syncable[expandedName] = meta
 						}
-					} else if strings.Contains(endpoint.Path, "{") && !resolvable {
+					} else if strings.Contains(endpoint.Path, "{") && !resolvable && !hasRequiredDependentScopeParams(endpoint) {
 						// Parameterized paginated paths can't sync standalone — track
 						// them for dependent-resource detection below. Carry the
 						// endpoint's metadata so x-resource-id and x-critical
@@ -473,14 +478,14 @@ func Profile(s *spec.APISpec) *APIProfile {
 							parameterized[key] = parameterizedEntry{
 								name:       name,
 								parentName: parentName,
-								meta:       metaFromEndpoint(s, r, endpoint, s.Types, resourceNameIndex),
+								meta:       metaFromEndpoint(s, resourceName, r, endpoint, s.Types, resourceNameIndex),
 							}
 						}
 					} else if standaloneList {
-						addSyncCandidate(resourceName, metaFromEndpoint(s, r, endpoint, s.Types, resourceNameIndex))
+						addSyncCandidate(resourceName, metaFromEndpoint(s, resourceName, r, endpoint, s.Types, resourceNameIndex))
 					}
 				} else if standaloneList {
-					addSyncCandidate(resourceName, metaFromEndpoint(s, r, endpoint, s.Types, resourceNameIndex))
+					addSyncCandidate(resourceName, metaFromEndpoint(s, resourceName, r, endpoint, s.Types, resourceNameIndex))
 				}
 			} else if method == "GET" && (!strings.Contains(endpoint.Path, "{") || pathParamsAllTemplateVars(endpoint.Path, s)) && !hasRequiredScopeParams(endpoint) && looksLikeCollectionEndpoint(endpointNameLower) && !isSamplerEndpoint(endpoint) && !isScalarItemArray(endpoint.Response) {
 				// Catch-all for simple GET collection endpoints that isListEndpoint
@@ -491,7 +496,7 @@ func Profile(s *spec.APISpec) *APIProfile {
 				// Re-apply the sampler and scalar-array guards here: this branch runs
 				// when isListEndpoint returned false, so without them a collection-named
 				// sampler/scalar-array endpoint would be re-admitted past those gates.
-				addSyncCandidate(resourceName, metaFromEndpoint(s, r, endpoint, s.Types, resourceNameIndex))
+				addSyncCandidate(resourceName, metaFromEndpoint(s, resourceName, r, endpoint, s.Types, resourceNameIndex))
 			}
 
 			if endpoint.Pagination != nil {
@@ -525,7 +530,7 @@ func Profile(s *spec.APISpec) *APIProfile {
 			}
 			for _, param := range endpoint.Params {
 				name := strings.ToLower(param.Name)
-				if strings.Contains(name, "since") || strings.Contains(name, "updated_after") || strings.Contains(name, "modified_since") || strings.Contains(name, "updated_at") {
+				if isEndpointSinceParamName(name) {
 					sinceParams[param.Name]++
 				}
 				if name == "dates" || name == "date_range" || name == "daterange" {
@@ -648,14 +653,14 @@ func (p *APIProfile) ToVisionaryPlan(apiName string) *vision.VisionaryPlan {
 	plan.Architecture = append(plan.Architecture,
 		vision.ArchitectureDecision{
 			Area:               "persistence",
-			NeedLevel:          lowHigh(p.HighVolume || p.OfflineValuable),
+			NeedLevel:          lowHigh(p.HighVolume || p.OfflineValuable || p.hasSyncableStoreResources()),
 			Decision:           "local store",
-			Rationale:          "Read-heavy or high-volume APIs benefit from local persistence for repeat access and offline workflows.",
+			Rationale:          "Read-heavy, high-volume, or profiler-confirmed syncable APIs benefit from local persistence for repeat access and offline workflows.",
 			ImplementationHint: "Use SQLite-backed storage and cache frequently accessed resources.",
 		},
 		vision.ArchitectureDecision{
 			Area:               "search",
-			NeedLevel:          lowHigh(p.NeedsSearch),
+			NeedLevel:          lowHigh(p.NeedsSearch || p.hasSyncableStoreResources()),
 			Decision:           "full-text indexing",
 			Rationale:          "Multi-resource list-heavy APIs need a fast local search surface when no dedicated endpoint exists.",
 			ImplementationHint: "Index string fields in FTS5 tables keyed by resource type.",
@@ -684,13 +689,14 @@ func (p *APIProfile) RecommendedFeatures() []string {
 	}
 
 	var features []string
-	if p.HighVolume {
+	hasSyncableStoreResources := p.hasSyncableStoreResources()
+	if p.HighVolume || hasSyncableStoreResources {
 		features = append(features, "sync")
 	}
-	if p.NeedsSearch {
+	if p.NeedsSearch || hasSyncableStoreResources {
 		features = append(features, "search")
 	}
-	if p.HighVolume || p.NeedsSearch || p.HasDependencies {
+	if p.HighVolume || p.NeedsSearch || p.HasDependencies || hasSyncableStoreResources {
 		features = append(features, "store")
 	}
 
@@ -704,6 +710,13 @@ func (p *APIProfile) RecommendedFeatures() []string {
 	}
 
 	return features
+}
+
+func (p *APIProfile) hasSyncableStoreResources() bool {
+	if p == nil {
+		return false
+	}
+	return len(p.SyncableResources) > 0 || len(p.DependentSyncResources) > 0
 }
 
 // SyncableResourceNames returns the names of the syncable resources.
@@ -840,18 +853,35 @@ func pathParamsAllTemplateVars(path string, s *spec.APISpec) bool {
 // hasRequiredScopeParams flags "scoped list" endpoints (e.g., GetFriendList
 // requires steamid) that can't be synced without runtime context.
 func hasRequiredScopeParams(endpoint spec.Endpoint) bool {
+	return hasRequiredScopeParamsForSync(endpoint, true)
+}
+
+// hasRequiredDependentScopeParams flags parameterized child endpoints that
+// require a caller-supplied query filter that dependent sync cannot satisfy.
+// Unlike hasRequiredScopeParams, enum params are not exempt here because
+// dependent sync has no per-parent enum-expansion path.
+func hasRequiredDependentScopeParams(endpoint spec.Endpoint) bool {
+	return hasRequiredScopeParamsForSync(endpoint, false)
+}
+
+func hasRequiredScopeParamsForSync(endpoint spec.Endpoint, allowEnumExpansion bool) bool {
 	temporalOrFormatParams := map[string]bool{
 		"since": true, "updated_after": true, "modified_since": true, "since_id": true,
 		"key": true, "format": true,
 	}
 	for _, param := range endpoint.Params {
 		if param.Required && !param.Positional && !param.PathParam {
+			if param.GlobalScope && strings.EqualFold(param.Type, "string") {
+				continue
+			}
 			lower := strings.ToLower(param.Name)
 			if pageSizeParamCandidates[lower] || cursorParamCandidates[lower] || temporalOrFormatParams[lower] {
 				continue
 			}
 			// Enum params with 2+ values are handled by enum expansion, not scope
-			if len(param.Enum) >= 2 {
+			// for flat resources. Dependent sync has no per-parent enum expansion
+			// path, so required enum filters are still unsatisfied there.
+			if allowEnumExpansion && len(param.Enum) >= 2 {
 				continue
 			}
 			return true
@@ -1359,6 +1389,7 @@ func dependentResourceFromEntry(entry parameterizedEntry, knownParents map[strin
 		IDField:            entry.meta.IDField,
 		Critical:           entry.meta.Critical,
 		SinceParam:         entry.meta.SinceParam,
+		SinceParamFormat:   entry.meta.SinceParamFormat,
 		SupportsPagination: entry.meta.SupportsPagination,
 		UsesHTMLResponse:   entry.meta.UsesHTMLResponse,
 		HTMLExtract:        entry.meta.HTMLExtract,
@@ -1561,7 +1592,7 @@ func applySpecWalkers(s *spec.APISpec, deps []DependentResource, syncable map[st
 				deps[idx].PathParams = dependentPathParams(e.Path, parent, deps[idx].ParentIDParam, keyField)
 				continue
 			}
-			meta := metaFromEndpoint(s, r, e, types, resourceNameIndex)
+			meta := metaFromEndpoint(s, resourceName, r, e, types, resourceNameIndex)
 			deps = append(deps, DependentResource{
 				Name:               spec.ToSnakeCase(resourceName),
 				ParentResource:     parent,
@@ -1573,6 +1604,7 @@ func applySpecWalkers(s *spec.APISpec, deps []DependentResource, syncable map[st
 				IDField:            meta.IDField,
 				Critical:           meta.Critical,
 				SinceParam:         meta.SinceParam,
+				SinceParamFormat:   meta.SinceParamFormat,
 				SupportsPagination: meta.SupportsPagination,
 				UsesHTMLResponse:   meta.UsesHTMLResponse,
 				HTMLExtract:        meta.HTMLExtract,
@@ -1824,6 +1856,7 @@ type syncableMeta struct {
 	IDField            string
 	Critical           bool
 	SinceParam         string
+	SinceParamFormat   string
 	SupportsPagination bool
 	UsesHTMLResponse   bool
 	HTMLExtract        *spec.HTMLExtract
@@ -1854,16 +1887,17 @@ type parameterizedEntry struct {
 // from path-item-level extensions (or, for IDField, from response-schema
 // inference). Keeps the per-endpoint plumbing in one place so future profiler
 // fields propagate uniformly.
-func metaFromEndpoint(s *spec.APISpec, resource spec.Resource, e spec.Endpoint, types map[string]spec.TypeDef, resourceNameIndex map[string]string) syncableMeta {
+func metaFromEndpoint(s *spec.APISpec, resourceName string, resource spec.Resource, e spec.Endpoint, types map[string]spec.TypeDef, resourceNameIndex map[string]string) syncableMeta {
 	idWalkFilterParam, idWalkLimitParam, idWalkPageSize := detectIDWalkParams(e)
 	return syncableMeta{
 		Path:               e.Path,
 		Method:             strings.ToUpper(e.Method),
 		Tier:               s.EffectiveTier(resource, e),
-		SkipDefaultSync:    isAuthTaggedEndpoint(e),
+		SkipDefaultSync:    isAuthTaggedEndpoint(e) || hasTypedResponseWithoutRuntimeID(resourceName, e, types),
 		IDField:            e.IDField,
 		Critical:           e.Critical,
 		SinceParam:         detectEndpointSinceParam(e.Params),
+		SinceParamFormat:   detectEndpointSinceParamFormat(e.Params),
 		SupportsPagination: endpointSupportsPagination(e),
 		UsesHTMLResponse:   e.UsesHTMLResponse(),
 		HTMLExtract:        e.HTMLExtract,
@@ -1874,6 +1908,104 @@ func metaFromEndpoint(s *spec.APISpec, resource spec.Resource, e spec.Endpoint, 
 		FieldSelector:      detectEndpointFieldSelector(e),
 		Discriminator:      discriminatorDispatchForEndpoint(e, types, resourceNameIndex),
 		ResponseItem:       e.Response.Item,
+	}
+}
+
+func hasTypedResponseWithoutRuntimeID(resourceName string, endpoint spec.Endpoint, types map[string]spec.TypeDef) bool {
+	if endpoint.IDField != "" || endpoint.Response.Item == "" {
+		return false
+	}
+	typeDef, ok := lookupTypeDef(endpoint.Response.Item, types)
+	if !ok {
+		return false
+	}
+	return !typeDefHasRuntimeIDField(resourceName, typeDef)
+}
+
+func typeDefHasRuntimeIDField(resourceName string, typeDef spec.TypeDef) bool {
+	fieldNames := make(map[string]struct{}, len(typeDef.Fields))
+	for _, field := range typeDef.Fields {
+		fieldNames[normalizeName(spec.ToSnakeCase(field.Name))] = struct{}{}
+	}
+	for _, key := range []string{"id", "gid", "sid", "uid", "uuid", "guid", "slug", "key", "code"} {
+		if _, ok := fieldNames[key]; ok {
+			return true
+		}
+	}
+	for _, base := range resourceIDBaseNames(resourceName) {
+		for _, suffix := range []string{"_id", "_code", "_key", "_slug"} {
+			if _, ok := fieldNames[base+suffix]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func resourceIDBaseNames(resourceName string) []string {
+	normalized := normalizeName(spec.ToSnakeCase(resourceName))
+	if normalized == "" {
+		return nil
+	}
+	bases := []string{normalized}
+	if stripped, ok := strings.CutPrefix(normalized, "get_"); ok && stripped != "" {
+		bases = append(bases, stripped)
+	}
+
+	out := make([]string, 0, len(bases)*2)
+	seen := map[string]struct{}{}
+	add := func(base string) {
+		if base == "" {
+			return
+		}
+		if _, ok := seen[base]; ok {
+			return
+		}
+		seen[base] = struct{}{}
+		out = append(out, base)
+	}
+	for _, base := range bases {
+		add(base)
+		add(singularizeResourceIDBase(base))
+	}
+	return out
+}
+
+func singularizeResourceIDBase(base string) string {
+	if base == "" {
+		return ""
+	}
+	idx := strings.LastIndex(base, "_")
+	prefix, last := "", base
+	if idx >= 0 {
+		prefix, last = base[:idx+1], base[idx+1:]
+	}
+	irregulars := map[string]string{
+		"properties": "property",
+		"companies":  "company",
+		"categories": "category",
+		"entries":    "entry",
+		"statuses":   "status",
+		"addresses":  "address",
+		"analyses":   "analysis",
+		"movies":     "movie",
+		"series":     "series",
+		"matrices":   "matrix",
+		"indices":    "index",
+		"vertices":   "vertex",
+	}
+	if singular, ok := irregulars[last]; ok {
+		return prefix + singular
+	}
+	switch {
+	case strings.HasSuffix(last, "ies") && len(last) > 3:
+		return prefix + last[:len(last)-3] + "y"
+	case strings.HasSuffix(last, "ses"), strings.HasSuffix(last, "xes"), strings.HasSuffix(last, "zes"):
+		return prefix + last[:len(last)-2]
+	case strings.HasSuffix(last, "s") && !strings.HasSuffix(last, "ss") && len(last) > 1:
+		return prefix + last[:len(last)-1]
+	default:
+		return base
 	}
 }
 
@@ -1983,13 +2115,36 @@ func paginationLimitDefault(endpoint spec.Endpoint) (int, bool) {
 // Profile() so per-endpoint detection stays consistent with the
 // PaginationProfile.SinceParam summary.
 func detectEndpointSinceParam(params []spec.Param) string {
+	name, _ := detectEndpointSinceParamAndFormat(params)
+	return name
+}
+
+func detectEndpointSinceParamFormat(params []spec.Param) string {
+	_, format := detectEndpointSinceParamAndFormat(params)
+	return format
+}
+
+func detectEndpointSinceParamAndFormat(params []spec.Param) (string, string) {
 	for _, p := range params {
 		name := strings.ToLower(p.Name)
-		if strings.Contains(name, "since") || strings.Contains(name, "updated_after") || strings.Contains(name, "modified_since") || strings.Contains(name, "updated_at") {
-			return p.Name
+		if isEndpointSinceParamName(name) {
+			return p.Name, strings.ToLower(strings.TrimSpace(p.Format))
 		}
 	}
-	return ""
+	return "", ""
+}
+
+func isEndpointSinceParamName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(name, "since") ||
+		strings.Contains(name, "updated_after") ||
+		strings.Contains(name, "modified_since") ||
+		strings.Contains(name, "updated_at") ||
+		name == "start_date" ||
+		name == "start_datetime" ||
+		name == "start_time" ||
+		name == "from_date" ||
+		name == "from_datetime"
 }
 
 func detectEndpointFieldSelector(endpoint spec.Endpoint) FieldSelector {
@@ -2276,6 +2431,7 @@ func sortedSyncableResources(m map[string]syncableMeta) []SyncableResource {
 			IDField:            meta.IDField,
 			Critical:           meta.Critical,
 			SinceParam:         meta.SinceParam,
+			SinceParamFormat:   meta.SinceParamFormat,
 			SupportsPagination: meta.SupportsPagination,
 			UsesHTMLResponse:   meta.UsesHTMLResponse,
 			HTMLExtract:        meta.HTMLExtract,

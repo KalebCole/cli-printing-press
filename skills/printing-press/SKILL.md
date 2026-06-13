@@ -141,9 +141,57 @@ _resolve_press_bin() {
   return 1
 }
 
+# Strict-older semver compare on the first three components. Pre-release
+# suffixes collapse to their GA counterpart (acceptable: we ship no pre-release
+# tags).
+_semver_lt() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    split(a, x, ".")
+    split(b, y, ".")
+    for (i = 1; i <= 3; i++) {
+      if ((x[i] + 0) < (y[i] + 0)) exit 0
+      if ((x[i] + 0) > (y[i] + 0)) exit 1
+    }
+    exit 1
+  }'
+}
+
+_source_press_version() {
+  sed -nE 's/^var[[:space:]]+Version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+    "$_scope_dir/internal/version/version.go" 2>/dev/null | head -n 1
+}
+
+_rebuild_local_press_bin_if_stale() {
+  if [ "$_press_repo" != "true" ] || [ ! -x "$_scope_dir/cli-printing-press" ]; then
+    return 0
+  fi
+
+  _local_v="$("$_scope_dir/cli-printing-press" version --json 2>/dev/null | sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')"
+  _source_v="$(_source_press_version)"
+  if [ -z "$_local_v" ] || [ -z "$_source_v" ] || ! _semver_lt "$_local_v" "$_source_v"; then
+    return 0
+  fi
+
+  echo ""
+  echo "[local-binary-stale] local build v$_local_v is older than source v$_source_v"
+  if ! command -v go >/dev/null 2>&1; then
+    echo "[setup-error] local cli-printing-press binary is stale and Go is not on PATH, so it cannot be rebuilt."
+    return 1 2>/dev/null || exit 1
+  fi
+
+  if (cd "$_scope_dir" && go build -o ./cli-printing-press ./cmd/cli-printing-press); then
+    echo "[local-binary-rebuilt] rebuilt $_scope_dir/cli-printing-press"
+    echo ""
+  else
+    echo "[setup-error] local cli-printing-press binary is stale and rebuild failed."
+    return 1 2>/dev/null || exit 1
+  fi
+}
+
 # Prefer local build when running from inside the printing-press repo.
-# The lefthook build hook keeps ./cli-printing-press current after every commit/pull,
-# so it's always newer than the go-install version.
+# Lefthook may keep ./cli-printing-press current, but hooks can be absent or
+# disabled. Compare against the checked-out source version before trusting it.
+_rebuild_local_press_bin_if_stale || { return 1 2>/dev/null || exit 1; }
 if [ "$_press_repo" = "true" ] && [ -x "$_scope_dir/cli-printing-press" ]; then
   export PATH="$_scope_dir:$PATH"
   echo "Using local build: $_scope_dir/cli-printing-press"
@@ -323,20 +371,6 @@ PRESS_VERCHECK_FILE="$PRESS_HOME/.version-check"
 PRESS_VERCHECK_TTL=86400
 _now_ts=$(date +%s)
 
-# Strict-older semver compare on the first three components. Pre-release
-# suffixes collapse to their GA counterpart (acceptable: we ship no pre-release
-# tags).
-_semver_lt() {
-  awk -v a="$1" -v b="$2" 'BEGIN {
-    split(a, x, ".")
-    split(b, y, ".")
-    for (i = 1; i <= 3; i++) {
-      if ((x[i] + 0) < (y[i] + 0)) exit 0
-      if ((x[i] + 0) > (y[i] + 0)) exit 1
-    }
-    exit 1
-  }'
-}
 _should_check=true
 if [ -f "$PRESS_VERCHECK_FILE" ] && [ -z "$PRESS_VERCHECK_FORCE" ]; then
   _last_ts=$(awk -F= '/^last_check=/{print $2}' "$PRESS_VERCHECK_FILE" 2>/dev/null)
@@ -501,7 +535,7 @@ CODEX_CONSECUTIVE_FAILURES=0
 ```
 <!-- PRESS_SETUP_CONTRACT_END -->
 
-**MANDATORY: Read and apply [references/setup-checks.md](references/setup-checks.md) immediately after the setup contract bash block runs, before any other action.** It handles the contract output signals: `[setup-error]` (refuse to run, surface the install instructions), `[repo-upgrade-available]` (interactive `AskUserQuestion` prompt + optional repo pull), `PRESS_REPO_MODE=<true|false>` plus the targeted global open-agent-skills freshness check, the min-binary-version compatibility check (hard stop if binary is too old), `[upgrade-required]` (hard gate below the published currency floor — interactive upgrade-or-abort, no skip), `[upgrade-available]` (interactive `AskUserQuestion` prompt + optional standalone binary upgrade), `[browser-tools-missing]` (interactive `AskUserQuestion` prompt + optional install of browser-use and/or agent-browser), and the `PRINTING_PRESS_BIN=<abs-path>` marker plus optional `[binary-shadow]` warning (capture the path; use it for every subsequent generator invocation). Skipping the reference will cause the skill to proceed with a missing or out-of-date binary, run with stale global skill text when the session is managed by open-agent-skills, hit a mid-flight install prompt if browser-sniff is later needed, or invoke the wrong binary because a stale global or the public catalog installer on `PATH` shadowed the local build. Do not skip.
+**MANDATORY: Read and apply [references/setup-checks.md](references/setup-checks.md) immediately after the setup contract bash block runs, before any other action.** It handles the contract output signals: `[setup-error]` (refuse to run, surface the install instructions), optional `[local-binary-stale]` / `[local-binary-rebuilt]` repo-mode rebuild markers, `[repo-upgrade-available]` (interactive `AskUserQuestion` prompt + optional repo pull), `PRESS_REPO_MODE=<true|false>` plus the targeted global open-agent-skills freshness check, the min-binary-version compatibility check (hard stop if binary is too old), `[upgrade-required]` (hard gate below the published currency floor — interactive upgrade-or-abort, no skip), `[upgrade-available]` (interactive `AskUserQuestion` prompt + optional standalone binary upgrade), `[browser-tools-missing]` (interactive `AskUserQuestion` prompt + optional install of browser-use and/or agent-browser), and the `PRINTING_PRESS_BIN=<abs-path>` marker plus optional `[binary-shadow]` warning (capture the path; use it for every subsequent generator invocation). Skipping the reference will cause the skill to proceed with a missing or out-of-date binary, run with stale global skill text when the session is managed by open-agent-skills, hit a mid-flight install prompt if browser-sniff is later needed, or invoke the wrong binary because a stale global or the public catalog installer on `PATH` shadowed the local build. Do not skip.
 
 **Absolute-path rule.** The preflight contract always emits `PRINTING_PRESS_BIN=<absolute path>` to stdout. Capture this value and substitute it (the resolved absolute path, not the literal `$PRINTING_PRESS_BIN` token) for every subsequent `cli-printing-press ...` invocation in this skill, references, and any sub-skill you delegate to. The `export PATH=...` line inside the contract only affects the single Bash tool call it runs in; later Bash tool calls open fresh shells and resolve bare `cli-printing-press` against the user's default `PATH`, where a stale globally-installed binary (`$HOME/go/bin/cli-printing-press`, Homebrew copy, etc.) will silently shadow the local build the preflight just chose. Bash code examples below are written `cli-printing-press generate ...` for readability — replace `cli-printing-press` with the captured absolute path each time you actually run one.
 
@@ -648,8 +682,26 @@ Default to option 1 unless the user overrides. Record the decision in `source-pr
 After you know `<api>` (from the Orientation & Briefing flow above; preflight already ran at the top), initialize the run-scoped artifact paths:
 
 ```bash
-RUN_ID="$(date +%Y%m%d-%H%M%S)"
-API_RUN_DIR="$PRESS_RUNSTATE/runs/$RUN_ID"
+mkdir -p "$PRESS_RUNSTATE/runs"
+RUN_ID=""
+API_RUN_DIR=""
+for attempt in 1 2 3 4 5; do
+  RUN_SUFFIX="$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 8 || true)"
+  if [ -z "$RUN_SUFFIX" ]; then
+    RUN_SUFFIX="pid$$-$attempt"
+  fi
+  CANDIDATE_RUN_ID="$(date +%Y%m%d-%H%M%S)-$RUN_SUFFIX"
+  CANDIDATE_RUN_DIR="$PRESS_RUNSTATE/runs/$CANDIDATE_RUN_ID"
+  if mkdir "$CANDIDATE_RUN_DIR" 2>/dev/null; then
+    RUN_ID="$CANDIDATE_RUN_ID"
+    API_RUN_DIR="$CANDIDATE_RUN_DIR"
+    break
+  fi
+done
+if [ -z "$RUN_ID" ]; then
+  echo "could not allocate a unique run directory under $PRESS_RUNSTATE/runs" >&2
+  exit 1
+fi
 RESEARCH_DIR="$API_RUN_DIR/research"
 PROOFS_DIR="$API_RUN_DIR/proofs"
 PIPELINE_DIR="$API_RUN_DIR/pipeline"
@@ -694,7 +746,7 @@ Maintain a lightweight state file at `$STATE_FILE` so `/printing-press-score` ca
 }
 ```
 
-`run_id` is the same `YYYYMMDD-HHMMSS` value computed earlier as `RUN_ID="$(date +%Y%m%d-%H%M%S)"`. The generator's manifest writer derives the same value from the `--research-dir` basename when generate is invoked through the canonical `$API_RUN_DIR` (whose basename equals `$RUN_ID`); persisting it in `state.json` here keeps `/printing-press-score` and any future state-loading consumer in sync. Without `run_id` in either path, `cli-printing-press dogfood --live --write-acceptance` refuses to write the gate marker.
+`run_id` is the unique value allocated above from the wall-clock stamp plus a short random suffix. `mkdir "$CANDIDATE_RUN_DIR"` is the collision guard: if another run already owns a candidate directory, allocate another ID instead of reusing the directory. Persisting this value in `state.json` makes the state file the source of truth for generate, dogfood acceptance, promote, `/printing-press-score`, and future state-loading consumers. Without `run_id` in either state or legacy path fallback, `cli-printing-press dogfood --live --write-acceptance` refuses to write the gate marker.
 
 Do not create a `go.work` file in `$CLI_WORK_DIR`. Generated modules must build and test as standalone modules; a mismatched workspace `go` directive can break Go 1.25+ toolchains and lefthook checks. Editor/gopls workspace noise is cosmetic and must not be traded for broken `go build` or `go test`.
 
@@ -820,7 +872,7 @@ Before new research:
    First, check lock status to detect active builds:
 
    ```bash
-   LOCK_STATUS=$(cli-printing-press lock status --cli <api>-pp-cli --json 2>/dev/null)
+   LOCK_STATUS=$("$PRINTING_PRESS_BIN" lock status --cli <api>-pp-cli --json 2>/dev/null)
    LOCK_HELD=$(echo "$LOCK_STATUS" | grep -o '"held"[[:space:]]*:[[:space:]]*[a-z]*' | head -1 | sed 's/.*: *//')
    LOCK_STALE=$(echo "$LOCK_STATUS" | grep -o '"stale"[[:space:]]*:[[:space:]]*[a-z]*' | head -1 | sed 's/.*: *//')
    LOCK_PHASE=$(echo "$LOCK_STATUS" | grep -o '"phase"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"phase"[[:space:]]*:[[:space:]]*"//;s/"//')
@@ -833,6 +885,7 @@ Before new research:
    CLI_DIR="$PRESS_LIBRARY/<api>"
    HAS_LIBRARY=false
    HAS_GOMOD=false
+   CLI_RELEASE_VERSION=""
    PRIOR_STEINBERGER_SCORE=""
    PRIOR_SUB60_REPRINT=false
    if [ -d "$CLI_DIR" ]; then
@@ -849,6 +902,10 @@ Before new research:
        if [ -n "$PRIOR_STEINBERGER_SCORE" ] && awk "BEGIN { exit !($PRIOR_STEINBERGER_SCORE < 60) }"; then
          PRIOR_SUB60_REPRINT=true
        fi
+     fi
+     RELEASE_MANIFEST="$CLI_DIR/.printing-press-release.json"
+     if [ -f "$RELEASE_MANIFEST" ]; then
+       CLI_RELEASE_VERSION=$(jq -r '.version // empty' "$RELEASE_MANIFEST" 2>/dev/null || true)
      fi
      # Get directory modification time as fallback
      CLI_MTIME=$(stat -f "%Sm" -t "%Y-%m-%d" "$CLI_DIR" 2>/dev/null || stat -c "%y" "$CLI_DIR" 2>/dev/null | cut -d' ' -f1)
@@ -876,6 +933,7 @@ Before new research:
    > Found existing `<api>` in library (last modified `<date>`).
 
    If `PRESS_VERSION` is available, append: `Built with printing-press v<version>.`
+   If `CLI_RELEASE_VERSION` is available, append: `Published CLI release: <version>.` This is the public-library per-CLI CalVer release, not the generator version; do not use it for the generator staleness comparison below.
    If `PRIOR_SUB60_REPRINT=true`, append: `Prior Steinberger score: <score>%. Reprint will require all approved transcendence rows to ship unless you explicitly accept partial coverage.`
 
    If prior research was also found (step 2), include the research summary alongside the library info.
@@ -913,16 +971,18 @@ Before new research:
 
    If no CLI exists in the local library and no lock is active, run the **Public-library check** below before proceeding to Phase 1.
 
-   #### Public-library check (registry.json)
+   #### Public-library check (registry.json + blocked-apis.json)
 
    The local library check above only sees CLIs this machine has already printed. A user on a fresh checkout — or one who typed a slightly different name than the published slug (`Slack` vs `slack-bot`, `Cal` vs `cal-com`), or who described what they wanted in their own words (`Hacker News reader`, `Notion clone`, `prediction market`) — will miss CLIs that already exist in the public library. Scan `mvanhorn/printing-press-library/registry.json` to catch those cases before Phase 1 research begins (the expensive 30-60-minute portion of the pipeline).
+
+   The public library also carries `blocked-apis.json`, a shared journal of APIs that were attempted and put on hold for reachability or buildability reasons. Scan it in the same Phase 0 window so a user does not repeat an already-known dead-end run before the blocking issue is fixed.
 
    **Skip this check entirely when:**
    - The local-library check above already prompted (mutual exclusion — do not double-ask).
    - `BROWSER_SNIFF_TARGET_URL` is set (the user is building a from-website CLI; the registry indexes API CLIs and naming collisions are unlikely and intentional).
    - The user passed `--har <path>` with an explicit `--name <api>` for a private capture.
 
-   **Fetch the registry.** Match the pattern `/printing-press-import` and `/printing-press-reprint` already use:
+   **Fetch the registry and blocked journal.** Match the pattern `/printing-press-import` and `/printing-press-reprint` already use:
 
    ```bash
    REGISTRY=$(mktemp)
@@ -933,9 +993,51 @@ Before new research:
      rm -f "$REGISTRY"
      REGISTRY=""
    fi
+
+   BLOCKED_APIS=$(mktemp)
+   if ! gh api -H "Accept: application/vnd.github.v3.raw" \
+        repos/mvanhorn/printing-press-library/contents/blocked-apis.json \
+        > "$BLOCKED_APIS" 2>/dev/null; then
+     echo "Blocked-API journal check skipped: blocked-apis.json unreachable or absent. Proceeding with the registry check."
+     rm -f "$BLOCKED_APIS"
+     BLOCKED_APIS=""
+   fi
    ```
 
-   Do not block on a network failure. After step 4 finishes, clean up the tempfile only if the fetch succeeded: `[ -n "$REGISTRY" ] && rm -f "$REGISTRY"`. The failure branch above already removed it and set `REGISTRY=""`, so an unconditional `rm -f "$REGISTRY"` would run `rm -f ""`.
+   Do not block on a network failure or on a missing `blocked-apis.json` file. After step 4 finishes, clean up tempfiles only if the fetch succeeded: `[ -n "$REGISTRY" ] && rm -f "$REGISTRY"` and `[ -n "$BLOCKED_APIS" ] && rm -f "$BLOCKED_APIS"`. The failure branches above already removed each file and set its variable to empty, so an unconditional `rm -f "$REGISTRY"` or `rm -f "$BLOCKED_APIS"` would run `rm -f ""`.
+
+   **Read the blocked journal before reasoning about registry matches.** If `BLOCKED_APIS` is non-empty, read it directly. Expected shape:
+
+   ```json
+   [
+     {
+       "slug": "1001tracklists",
+       "attempted_at": "2026-05-25",
+       "verdict": "hold",
+       "reason": "Cloudflare Turnstile clearance gate; pure-HTTP cannot mint fsuid",
+       "blocking_issue": 2140,
+       "permanent": false
+     }
+   ]
+   ```
+
+   Entries are API-slug records, not printed-CLI registry entries. Match the user's requested API against `slug` using the same slug-normalization judgment as the registry check (`<api>`, `<api>-cli`, `<api>-pp-cli`, punctuation and case variants). Do not use vague category or description matching for the blocked journal. A false positive here stops a potentially valid run; only prompt when the entry appears to be the same API under a slug or brand spelling variant.
+
+   If a blocked entry matches, prompt before reading registry matches:
+
+   > "`<entry.slug>` was attempted on `<entry.attempted_at>` and held — `<entry.reason>`<tracking suffix>. The shared blocked-API journal exists so users do not repeat known unreachable or unbuildable runs before the blocker changes. Proceed anyway?"
+
+   Where `<tracking suffix>` is:
+   - ` (tracking #<entry.blocking_issue>; marked permanent)` when `blocking_issue` is non-null and `permanent` is `true`.
+   - ` (tracking #<entry.blocking_issue>)` when `blocking_issue` is non-null and `permanent` is `false`.
+   - ` (marked permanent)` when `permanent` is `true` and `blocking_issue` is `null`.
+   - empty when neither applies.
+
+   Options:
+   1. **Stop here (recommended)** — end this run. If a tracking issue is present, tell the user to re-attempt only after that issue closes or the journal entry is updated.
+   2. **Proceed anyway** — continue to the registry check and then Phase 1. Use this only when the user has new evidence that the blocker no longer applies or wants a deliberate fresh attempt.
+
+   If multiple blocked entries somehow match, pick the most recent `attempted_at` value and mention that additional older journal entries exist. If `blocked-apis.json` is malformed, print "Blocked-API journal check skipped: blocked-apis.json is malformed. Proceeding with the registry check." and continue; do not let a bad journal file block fresh prints.
 
    **Read the registry and reason about matches** — do not gate on string equality alone. The file is small (~88 KB, ~135 entries today); read it directly and use judgment. Each entry has fields `name` (slug), `category`, `api` (brand display), `description`, `path`, `printer`.
 
@@ -1947,6 +2049,8 @@ If one or more probe-safe endpoints are declared and the user provided credentia
 
 ### OAuth2 Grant Probe
 
+For OAuth2 Authorization Code + PKCE CLI implementation/review requirements, read [references/oauth2-pkce-cli-checklist.md](references/oauth2-pkce-cli-checklist.md).
+
 If the resolved spec declares `auth.type: oauth2` and has an interactive
 authorization URL (`authorizationCode` or `implicit` flow in OpenAPI, or an
 equivalent internal YAML auth field), the generic reachability check is not
@@ -2911,7 +3015,7 @@ If generation fails:
 - prefer generator fixes over manual generated-code surgery when the failure is systemic
 - if retries are exhausted, release the lock and stop:
   ```bash
-  cli-printing-press lock release --cli <api>-pp-cli
+  "$PRINTING_PRESS_BIN" lock release --cli <api>-pp-cli
   ```
 
 ## Phase 3: Build The GOAT
@@ -2977,7 +3081,7 @@ Priority 3 (polish):
 
 ### Agent Build Checklist (per command)
 
-After building each command in Priority 1 and Priority 2, verify these 12 principles are met. These map 1:1 to what Phase 4.9's agent readiness reviewer will check - apply them now so the review becomes a confirmation, not a catch-all.
+After building each command in Priority 1 and Priority 2, verify these 13 principles are met. These map 1:1 to what Phase 4.9's agent readiness reviewer will check - apply them now so the review becomes a confirmation, not a catch-all.
 
 1. **Non-interactive**: No TTY prompts, no `bufio.Scanner(os.Stdin)`, works in CI without a terminal
 2. **Structured output**: `--json` produces valid JSON, `--select` filters fields correctly. Hand-written novel commands that build a Go-typed slice/struct and emit JSON should use the generated receiver-style helper, `flags.printJSON(cmd, v)`, or call `printJSONFiltered(cmd.OutOrStdout(), v, flags)` directly. Both route through `printOutputWithFlags`, picking up `--select`, `--compact`, `--csv`, and `--quiet` for free. Verify with `<cli> <novel> --json --select <field> | jq 'keys'` returning only the requested fields.
@@ -3007,12 +3111,13 @@ After building each command in Priority 1 and Priority 2, verify these 12 princi
      ```
      Distinct from `IsVerifyEnv`: dogfood is a real-API matrix, so curtail work (paginate once, smaller `--limit`), never substitute mock data for real calls.
 10. **Per-source rate limiting**: any hand-written client in a sibling internal package (`internal/source/<name>/`, `internal/recipes/`, `internal/phgraphql/`, etc. — anything not generator-emitted) that makes outbound HTTP calls MUST use `cliutil.AdaptiveLimiter` and surface `*cliutil.RateLimitError` when 429 retries are exhausted. Empty-on-throttle is indistinguishable from "no data exists" and silently corrupts downstream queries. Read [references/per-source-rate-limiting.md](references/per-source-rate-limiting.md) when authoring a sibling client. Enforced at generation time by dogfood's `source_client_check`.
-11. **Parallel-fetch partial failures**: any command that fans out N API calls and computes an aggregate (averages, rollups, comparisons, cross-source merges, digest summaries) MUST preserve each fetch error through the result channel and exclude error-tagged entries from totals and denominators. Failed fetches may still appear in the response so the caller can see the gap, but they must not become zero-valued phantom rows that dilute averages or counts. Surface the partial failure explicitly with:
+11. **Per-command timeout boundary**: Hand-written novel commands that call a sibling typed HTTP client (`internal/<api>/`, `internal/source/<name>/`, `internal/recipes/`, etc.) MUST wrap `cmd.Context()` with `boundCtx(cmd.Context(), flags)` and `defer cancel()` before the first client call. Generated endpoint commands already pass `flags.timeout` into `client.New`; sibling clients do not. Without this boundary, root `--timeout` is advertised in help but does not bound wide scans, crawlers, or fan-out loops.
+12. **Parallel-fetch partial failures**: any command that fans out N API calls and computes an aggregate (averages, rollups, comparisons, cross-source merges, digest summaries) MUST preserve each fetch error through the result channel and exclude error-tagged entries from totals and denominators. Failed fetches may still appear in the response so the caller can see the gap, but they must not become zero-valued phantom rows that dilute averages or counts. Surface the partial failure explicitly with:
    - a stderr warning that names the failed count and the actual aggregation denominator, for example `warning: 2 of 10 fetches failed; averages computed over the remaining 8 items`
    - a `fetch_failures` field in the JSON response envelope listing the failed entries and error messages
 
 Silently averaging phantom zeros is worse than reporting a partial result.
-12. **Scan-and-filter caps**: any hand-written transcendence command that scans
+13. **Scan-and-filter caps**: any hand-written transcendence command that scans
     a paginated or otherwise unsorted endpoint, filters locally, and then keeps
     matching rows MUST bound scan effort separately from output size. This is the
     "list, filter locally, fan out to detail" shape: the API cannot filter on the
@@ -3151,6 +3256,20 @@ RunE: func(cmd *cobra.Command, args []string) error {
 
 Why each branch exists: the `len(args) == 0 && cmd.Flags().NFlag() == 0` branch handles an interactive `<cli> mycommand` help-only invocation without treating help as an error. The `dryRunOK` branch handles verify's `<cli> mycommand <fixture> --dry-run` probes before network or filesystem IO. The required-input branch handles non-help invocations where a mode or output flag is present (`--no-input`, `--agent`, `--json`) but the required ID, query, path, or other command input is still missing. Missing required input must print usage and return `usageErr(...)` so callers get exit code 2 instead of a silent rc=0 skip.
 
+For SQLite-backed novel commands only, add this missing-mirror guard after `dryRunOK(flags)`, after any required-input `usageErr(...)` check, and after `dbPath` is resolved, but before `store.OpenWithContext`, `store.OpenReadOnly`, `sql.Open`, or other SQLite access:
+
+```go
+if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+	fmt.Fprintf(cmd.ErrOrStderr(), "no local mirror at %s\nrun: <cli> sync --resources <resource> --db %s\n", dbPath, dbPath)
+	if flags.asJSON || flags.agent {
+		fmt.Fprintln(cmd.OutOrStdout(), "[]")
+	}
+	return nil
+}
+```
+
+The missing-mirror branch covers a different probe layer from `dryRunOK`: live execution without `--dry-run`, before the user has run `sync`. Return empty JSON (`[]`) for `--json` / `--agent` so agents receive a valid empty result instead of a SQLite open failure; print a human hint to stderr that names the sync command needed to populate the mirror. The unconditional `return nil` is intentional for both machine and human paths: a missing local mirror is an empty local-cache state, not a usage or API failure. Do not add this branch to novel commands that call live API endpoints directly or do not use the local store.
+
 Multi-positional commands (N >= 2 required args) must use a two-check shape so only the bare help probe returns exit 0:
 
 ```go
@@ -3267,6 +3386,7 @@ The generator handles Priority 0 (data layer) and most of Priority 1 (absorbed A
 - `printAutoTable(w io.Writer, items []map[string]any) error` - render JSON-like rows as the generated human table format.
 - `defaultDBPath(name string) string` - resolve the local SQLite database path for `<name>`.
 - `dryRunOK(flags *rootFlags) bool` - detect verify-friendly `--dry-run` short-circuits before network, store, or filesystem work.
+- `boundCtx(parent context.Context, flags *rootFlags) (context.Context, context.CancelFunc)` - apply root `--timeout` to hand-written commands that call sibling typed clients instead of the generated `internal/client`.
 - `filterFields(data json.RawMessage, fields string) json.RawMessage` - apply `--select` to a JSON blob.
 - `compactFields(data json.RawMessage) json.RawMessage` - apply `--compact` to a JSON blob.
 - `isTerminal(w io.Writer) bool` - detect terminal output versus pipes.
@@ -3279,7 +3399,7 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
-	// add: "encoding/json", "fmt", "<module>/internal/store", etc. as needed
+	// add: "encoding/json", "fmt", "os", "<module>/internal/store", etc. as needed
 )
 
 func newNovelXxxCmd(flags *rootFlags) *cobra.Command {
@@ -3318,7 +3438,7 @@ func newNovelXxxCmd(flags *rootFlags) *cobra.Command {
 // Single-word Commands register directly: rootCmd.AddCommand(newNovelXxxCmd(flags)).
 ```
 
-**RunE skeleton — API-call shape** (live data via the generated client):
+**RunE skeleton — API-call shape** (live data via a sibling typed client):
 
 ```go
 RunE: func(cmd *cobra.Command, args []string) error {
@@ -3329,18 +3449,20 @@ RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "would fetch <resource>")
 		return nil
 	}
+	ctx, cancel := boundCtx(cmd.Context(), flags)
+	defer cancel()
 	if <required input missing> {
 		_ = cmd.Usage()
 		return usageErr(fmt.Errorf("<flag-or-arg> is required"))
 	}
-	c, err := flags.newClient()
+	c, err := newSiblingClient(flags) // replace with your internal/<api> or internal/source/<name> constructor
 	if err != nil {
 		return err
 	}
-	// Replace path with the absorbed endpoint or hand-rolled URL. Use
-	// cliutil.FanoutRun for any --site/--source/--region CSV fan-out;
-	// re-implementing fanout inline is the recipe-goat silent-drop bug.
-	data, err := c.Get("/api/v1/path", nil)
+	// Pass ctx to every sibling-client request so root --timeout bounds
+	// crawls, wide scans, and fan-out loops. Generated endpoint commands that
+	// use flags.newClient()/internal/client already consume flags.timeout.
+	data, err := c.FetchResource(ctx, <request params>)
 	if err != nil {
 		return fmt.Errorf("fetching <resource>: %w", err)
 	}
@@ -3373,11 +3495,13 @@ RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "would fetch <resource> details")
 		return nil
 	}
+	ctx, cancel := boundCtx(cmd.Context(), flags)
+	defer cancel()
 	if <required input missing> {
 		_ = cmd.Usage()
 		return usageErr(fmt.Errorf("<flag-or-arg> is required"))
 	}
-	c, err := flags.newClient()
+	c, err := newSiblingClient(flags) // replace with your internal/<api> or internal/source/<name> constructor
 	if err != nil {
 		return err
 	}
@@ -3394,7 +3518,7 @@ RunE: func(cmd *cobra.Command, args []string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			data, err := c.Get("/api/v1/resource/"+url.PathEscape(id), nil)
+			data, err := c.FetchDetail(ctx, id)
 			if err != nil {
 				results <- fetchResult{idx: idx, id: id, err: err}
 				return
@@ -3472,6 +3596,8 @@ RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "would query local store")
 		return nil
 	}
+	ctx, cancel := boundCtx(cmd.Context(), flags)
+	defer cancel()
 	if <required input missing> {
 		_ = cmd.Usage()
 		return usageErr(fmt.Errorf("<flag-or-arg> is required"))
@@ -3479,7 +3605,14 @@ RunE: func(cmd *cobra.Command, args []string) error {
 	if dbPath == "" {
 		dbPath = defaultDBPath("<cli>-pp-cli") // replace <cli> with the API slug
 	}
-	db, err := store.OpenWithContext(cmd.Context(), dbPath)
+	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "no local mirror at %s\nrun: <cli> sync --resources <resource> --db %s\n", dbPath, dbPath)
+		if flags.asJSON || flags.agent {
+			fmt.Fprintln(cmd.OutOrStdout(), "[]")
+		}
+		return nil
+	}
+	db, err := store.OpenWithContext(ctx, dbPath)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
@@ -3490,7 +3623,7 @@ RunE: func(cmd *cobra.Command, args []string) error {
 	// API only exposes the resource flat; add a <resource_singular>
 	// entry for APIs that toggle plural/singular casing. SQL must be
 	// SELECT-only; the search/sql gates reject mutating statements.
-	rows, err := db.DB().QueryContext(cmd.Context(), `
+	rows, err := db.DB().QueryContext(ctx, `
 		SELECT id, data FROM resources
 		WHERE resource_type IN ('<resource>', '<parent>_<resource>')
 		  AND ...`)
@@ -3559,7 +3692,7 @@ For an extension to be durable, put it in its own file beside the emitted one:
 
 - **Custom config fields:** create `internal/config/<api>_config.go` exporting accessors your novel code reads directly. Do not add fields to the emitted `Config` struct.
 - **Custom request headers** (vendor fingerprint, `X-CSRF`, app-version, signed timestamps): create `internal/client/<api>_headers.go` exporting a func that builds the header map; novel code passes that map to `client.GetWithHeaders` / `PostWithHeaders` when it calls the API. The generated `client.go` has no global request mutator, so this pattern only covers requests made directly from novel code — it does not intercept calls from generated endpoint commands. Do not edit the templated header block in `client.go`.
-- **Custom auth flow** (browser-sniffed sessions, vendor SSO, refresh hooks beyond OAuth2): create `internal/cli/<api>_auth.go` (package `cli`, same as the generated `auth.go`) with the API-specific token capture or refresh, and wire it from a novel command rather than editing the templated `auth.go` constructor functions (`newAuthLoginCmd`, `newAuthSetupCmd`, etc.).
+- **Custom auth flow** (browser-sniffed sessions, vendor SSO, refresh hooks beyond OAuth2): create `internal/cli/<api>_auth.go` (package `cli`, same as the generated `auth.go`) with the API-specific token capture or refresh, and wire it from a novel command rather than editing the templated `auth.go` constructor functions (`newAuthLoginCmd`, `newAuthSetupCmd`, etc.). If the custom flow implements OAuth2 Authorization Code + PKCE, read [references/oauth2-pkce-cli-checklist.md](references/oauth2-pkce-cli-checklist.md) before writing or reviewing the command.
 - **Extended store schema** (typed tables beyond `resources`, vendor JSON columns, full-text indexes): create `internal/store/<api>_migrations.go` running its own `CREATE TABLE ... IF NOT EXISTS` from a lazy init invoked by the novel commands that need it. Do not edit the migration slice in `store.go`.
 - **New novel command:** put the command body in its own `internal/cli/<feature>.go` file — it survives regen as a whole hand-authored unit. The `AddCommand` call wiring it into the Cobra tree still goes in `root.go` per the Phase 3 novel-command skeleton above; `cli-printing-press generate --force` re-injects it via the lost-registration merge path. Use standalone `regen-merge` when you want to inspect the merge report before applying. Spec-declared commands are picked up by the generator's typed-tool path and need no hand-wired `AddCommand` at all.
 
@@ -3670,7 +3803,7 @@ Include:
 
 If the final verdict is `hold`, release the lock without promoting to library:
 ```bash
-cli-printing-press lock release --cli <api>-pp-cli
+"$PRINTING_PRESS_BIN" lock release --cli <api>-pp-cli
 ```
 The working copy remains in `$CLI_WORK_DIR` for potential future retry. Proceed to Phase 5.6 to archive manuscripts (archiving still happens on hold).
 
@@ -3799,6 +3932,8 @@ The sub-skill carries `context: fork` so the reviewer agent's diagnostic chatter
 **Runs after Phase 4.85, before Phase 5.** Reviews the printed CLI source for security and correctness issues *before* any PR exists. This is the cheapest fix window in the pipeline — session context is hot, no PR feedback round-trip, no CI comments to chase. Catching issues here means they never become PR-time review comments, which is the wrong fix window for the same problems.
 
 **Target.** The generated CLI and MCP source under `$CLI_WORK_DIR`. In scope: `internal/cli/`, `internal/mcp/` (excluding `cobratree/`), `internal/store/`, `internal/client/`, and `cmd/`. **Out of scope:** `internal/cliutil/` and `internal/mcp/cobratree/` — these are generator-reserved packages. Any finding there is a machine bug; route to retro, do not patch in place.
+
+**Native timeout-boundary check.** Before reviewer dispatch, scan every hand-written file under `internal/cli/` that imports a sibling internal package (`internal/<api>/`, `internal/source/<name>/`, `internal/recipes/`, `internal/phgraphql/`, etc.) and makes live requests. Each such command file must call `boundCtx(cmd.Context(), flags)` and pass that context into the sibling client or store query path before the first request. Files that only use `flags.newClient()` / generated `internal/client` are already covered by `client.New(cfg, flags.timeout, ...)` and should not be flagged for missing `boundCtx`.
 
 **Tool selection — pick what's installed, do not name-match.** This phase needs *a* code review, not a specific named command. Survey the review-shaped capabilities the current harness has and pick the best fit. Plausible candidates (names drift across harnesses and plugin sets; treat this as an example list, not a closed set):
 
@@ -3981,7 +4116,7 @@ keep PII out of the acceptance report from the moment you write it.
 **Gate = FAIL:** fix issues inline (Step 3) and re-run failing tests, up to
 2 fix loops. If the gate still fails after 2 loops, put the CLI on hold:
 ```bash
-cli-printing-press lock release --cli <api>-pp-cli
+"$PRINTING_PRESS_BIN" lock release --cli <api>-pp-cli
 ```
 The working copy remains in `$CLI_WORK_DIR`. Proceed to Phase 5.6 to archive
 manuscripts (archiving still happens on hold). Tag the failure reason in the
@@ -4080,9 +4215,12 @@ proof or a hold decision.
 **Always runs.** Invoke the `printing-press-polish` skill to run diagnostics, fix quality issues, and return a delta. The polish skill carries `context: fork` in its frontmatter, so its diagnostic-fix-rediagnose loop runs in a forked context — diagnostic spam, fix iterations, and re-audits stay scoped to the polish session and don't pollute this generation flow. The skill is autonomous — no user input needed. The goal is to ship the best CLI possible, not the fastest.
 
 Before invoking polish, collect the Phase 3 transcendence gate state and include
-it in the polish input bundle:
+it in the polish input bundle. Include the captured `PRINTING_PRESS_BIN` value
+so the forked polish skill uses the same preflight-selected binary instead of
+resolving a potentially stale global binary from PATH:
 
 ```yaml
+printing_press_bin: <captured PRINTING_PRESS_BIN>
 phase3_transcendence_rows_planned: <planned>
 phase3_transcendence_rows_built: <built>
 phase3_transcendence_rows_missing:
@@ -4098,6 +4236,7 @@ Pass `$CLI_WORK_DIR` as the first line of `args`, followed by the Phase 3 bundle
 Skill(
   skill: "cli-printing-press:printing-press-polish",
   args: "$CLI_WORK_DIR
+printing_press_bin: <captured PRINTING_PRESS_BIN>
 phase3_transcendence_rows_planned: <planned>
 phase3_transcendence_rows_built: <built>
 phase3_transcendence_rows_missing:
@@ -4205,11 +4344,11 @@ novel list:
 REGEN_DRY_RUN_REPORT="$PROOFS_DIR/regen-merge-dry-run-report.json"
 PATH_A_REBUILT_NOVELS=0
 if [ -d "$LIB_TARGET" ] && [ "$NOVEL_COUNT" -gt 0 ]; then
-  if ! cli-printing-press regen-merge "$LIB_TARGET" \
+  if ! "$PRINTING_PRESS_BIN" regen-merge "$LIB_TARGET" \
       --fresh "$CLI_WORK_DIR" --json > "$REGEN_DRY_RUN_REPORT"; then
     # Real error (input error, missing fresh tree, unreadable library). Release
     # the upstream pipeline lock and surface the dry-run failure.
-    cli-printing-press lock release --cli <api>-pp-cli
+    "$PRINTING_PRESS_BIN" lock release --cli <api>-pp-cli
     echo "regen-merge dry-run failed; see $REGEN_DRY_RUN_REPORT" >&2
     exit 1
   fi
@@ -4252,7 +4391,7 @@ The override is forbidden unless the fresh tree contains the novels:
 
 ```bash
 # Atomic swap: copies working dir, writes manifest, updates run pointer, releases lock.
-cli-printing-press lock promote --cli <api>-pp-cli --dir "$CLI_WORK_DIR"
+"$PRINTING_PRESS_BIN" lock promote --cli <api>-pp-cli --dir "$CLI_WORK_DIR"
 ```
 
 The `promote` command handles the full sequence: stages the working directory, atomically swaps it into `$PRESS_LIBRARY/<api>` (slug-keyed), writes the `.printing-press.json` manifest, updates the `CurrentRunPointer`, and releases the lock — all in one step. The `--cli` flag accepts the CLI binary name; the Go code translates to the slug-keyed library path internally.
@@ -4263,12 +4402,12 @@ The `promote` command handles the full sequence: stages the working directory, a
 
 ```bash
 REGEN_REPORT="$PROOFS_DIR/regen-merge-report.json"
-if ! cli-printing-press regen-merge "$LIB_TARGET" \
+if ! "$PRINTING_PRESS_BIN" regen-merge "$LIB_TARGET" \
     --fresh "$CLI_WORK_DIR" --apply --json > "$REGEN_REPORT"; then
   # Real error (input error, apply failure). Release the lock — it was
   # acquired upstream by the press pipeline; regen-merge does not own it —
   # and surface the failure to the user.
-  cli-printing-press lock release --cli <api>-pp-cli
+  "$PRINTING_PRESS_BIN" lock release --cli <api>-pp-cli
   echo "regen-merge --apply failed; see $REGEN_REPORT" >&2
   exit 1
 fi
@@ -4282,7 +4421,7 @@ NEEDS_REVIEW=$(jq '[.files[] | select(.verdict == "TEMPLATED-WITH-ADDITIONS"
 if [ "$NEEDS_REVIEW" -gt 0 ]; then
   # Release the lock so the next reprint of this CLI is not blocked until
   # timeout. lock promote would have released it; the halt path must too.
-  cli-printing-press lock release --cli <api>-pp-cli
+  "$PRINTING_PRESS_BIN" lock release --cli <api>-pp-cli
   echo "regen-merge flagged $NEEDS_REVIEW file(s) for human review. " \
        "Inspect $REGEN_REPORT, resolve inline hand-edits, then re-run." >&2
   exit 1
@@ -4304,8 +4443,8 @@ else
   # line-shifted generator files and surface false-positive pendings.
   rm -f "$LIB_TARGET/.printing-press-pii-polish.json"
 fi
-cli-printing-press lock promote --cli <api>-pp-cli --dir "$LIB_TARGET" || {
-  cli-printing-press lock release --cli <api>-pp-cli
+"$PRINTING_PRESS_BIN" lock promote --cli <api>-pp-cli --dir "$LIB_TARGET" || {
+  "$PRINTING_PRESS_BIN" lock release --cli <api>-pp-cli
   echo "lock promote failed for $LIB_TARGET; lock released. " \
        "Inspect the PII gate output above and resolve before re-running." >&2
   exit 1
@@ -4498,13 +4637,16 @@ End normally. The CLI is in `$PRESS_LIBRARY/<api>` and the user can run `/printi
 
 The CLI did not promote to library. The working copy is at `$CLI_WORK_DIR`; manuscripts and proofs are archived. Hold runs are the highest-value retro signal — something blocked the machine from reaching ship, and that signal is most valuable while session context is fresh.
 
+Before rendering the menu, decide whether this hold should offer a blocked-API journal entry. Offer journaling only when the one-line hold reason is a reachability or buildability blocker that would likely repeat for another user before a machine or upstream change, for example browser-clearance barriers, Cloudflare Turnstile, login/session surfaces that a pure-HTTP printed CLI cannot replay, unreachable official specs, or an upstream API that cannot be called from generated code. Do not offer journaling for ordinary fix-loop failures, local setup problems, missing credentials, temporary network outages, test flakes, or quality issues that polish can plausibly fix.
+
 Present via `AskUserQuestion`:
 
 > "<api> couldn't pass shipcheck — <one-line reason from the shipcheck report or polish result>. The working copy is at <expanded $CLI_WORK_DIR path> and was not added to the library. What do you want to do?"
 >
 > 1. **Run retro** (recommended) — capture what blocked ship so the Printing Press maintainers can fix it for the next CLI you generate
 > 2. **Polish to retry** — run another polish pass and try again to reach ship
-> 3. **Done for now**
+> 3. **Add to blocked-API journal** — open a public-library PR that appends or updates `blocked-apis.json` so future `/printing-press <api>` runs warn before repeating this held attempt. Include this option only for repeatable reachability/buildability holds as described above.
+> 4. **Done for now**
 
 Default the recommendation to **Run retro**. Override to **Polish to retry** when the polish result block specifically says another pass is likely to close the gap (`further_polish_recommended: yes`) — that signal means the CLI is on hold not because the machine is structurally short, but because the last polish pass ran out of time on issues it can plausibly close.
 
@@ -4519,7 +4661,8 @@ Invoke `/printing-press-retro`. The retro skill analyzes the session for generat
 ```
 Skill(
   skill: "cli-printing-press:printing-press-polish",
-  args: "$CLI_WORK_DIR"
+  args: "$CLI_WORK_DIR
+printing_press_bin: <captured PRINTING_PRESS_BIN>"
 )
 ```
 
@@ -4528,13 +4671,29 @@ Three reasons for this exact form, all mirroring Phase 5.5:
 1. **Pass `$CLI_WORK_DIR` (absolute path), not the slug.** Hold runs leave the CLI in the working directory because Phase 5.6 did not promote — `$PRESS_LIBRARY/<slug>/` either does not exist or holds a stale prior run, and a slug-form invocation would polish that stale copy.
 2. **Use the Skill tool (forked context), not the `/printing-press-polish` slash command.** This matches Phase 5.5's invocation pattern — same shape, same expectations. Slash-command invocations auto-enable polish's standalone mode (Publish Offer fires); the Skill tool form defers to the parent unless `--standalone` is passed explicitly. Main SKILL owns the menu on this path.
 3. **Do not include `--standalone` in `args`.** The flag is what polish gates its Publish Offer on (see polish SKILL.md "Publish Offer"). On the hold path the CLI has not been promoted; firing the offer would open a public PR for an un-promoted, un-shipped working copy.
+4. **Pass `printing_press_bin`.** Use the absolute path captured by the parent setup preflight so this forked polish pass cannot downgrade the CLI by resolving an older global binary.
+
+#### If "Add to blocked-API journal"
+
+Invoke `/printing-press-publish --blocked-api-journal <api>`. The publish skill owns public-library writes and will append or update only `blocked-apis.json`, not `registry.json`, README catalog cells, generated skill mirrors, or a printed CLI package.
+
+Pass the journal fields from the current run context:
+
+- `slug`: the canonical API slug (`<api>`), not the CLI binary name.
+- `attempted_at`: today's date in `YYYY-MM-DD` form.
+- `verdict`: always `hold`.
+- `reason`: one concise sentence from the hold reason. Do not include secrets, local paths, cookies, tokens, or user-specific account details.
+- `blocking_issue`: the Printing Press issue number that would unblock this API if known, otherwise `null`.
+- `permanent`: `true` only when the API is fundamentally incompatible with a replayable printed CLI, such as a resident-browser-only product surface with no API or stable replayable HTTP path. Use `false` for machine gaps that could be fixed.
+
+If the current hold also warrants a retro, tell the user after the journal PR opens that a retro is still useful for the machine-level fix. Do not run retro automatically from this branch; the user chose the journal action.
 
 After polish returns, parse the result block and act on the new `ship_recommendation`:
 
 - **Polish landed on `ship` or `ship-with-gaps`** — the verdict transitioned out of hold. The working copy is still un-promoted; the library is stale. Run promote, then route to the ship-path menu (above):
 
   ```bash
-  cli-printing-press lock promote --cli <api>-pp-cli --dir "$CLI_WORK_DIR"
+  "$PRINTING_PRESS_BIN" lock promote --cli <api>-pp-cli --dir "$CLI_WORK_DIR"
   ```
 
   Then re-enter the ship-path menu using polish's new result block. Skip the Phase 5.6 acceptance-gate JSON check — that gate was already satisfied when this run originally reached Phase 5.6, and polish does not regenerate it.

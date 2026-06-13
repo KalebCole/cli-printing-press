@@ -286,6 +286,13 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"authAgentEnvVars":                   authAgentEnvVars,
 		"hasAuthEnvVarKind":                  hasAuthEnvVarKind,
 		"isRequestAuthEnvVar":                isRequestAuthEnvVar,
+		"requiredRequestAuthEnvVars":         requiredRequestAuthEnvVars,
+		"optionalRequestAuthEnvVars":         optionalRequestAuthEnvVars,
+		"requiredRequestAuthEnvVarCount":     requiredRequestAuthEnvVarCount,
+		"requestAuthEnvVarCount":             requestAuthEnvVarCount,
+		"authSetTokenAvailable":              authSetTokenAvailable,
+		"authErrorCheckHint":                 authErrorCheckHint,
+		"authSetupHint":                      authSetupHint,
 		"authEnvPlaceholder":                 authEnvPlaceholder,
 		"authEnvPlaceholderByName":           authEnvPlaceholderByName,
 		"authEnvHintComment":                 authEnvHintComment,
@@ -298,6 +305,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"composeMCPDesc":                     composeMCPDesc,
 		"composeMCPSubDesc":                  composeMCPSubDesc,
 		"mcpParamDesc":                       g.mcpParamDescription,
+		"hasDefaultSyncResources":            hasDefaultSyncResources,
 		"flagName":                           flagName,
 		"paramIdent":                         paramIdent,
 		"paramWireName":                      paramWireName,
@@ -316,11 +324,13 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		},
 		"exampleLine":         g.exampleLine,
 		"promotedExampleLine": g.promotedExampleLine,
+		"exampleNeedsTODO":    exampleNeedsTODO,
 		"commandExampleArgs":  commandExampleArgs,
 		"currentYear":         func() string { return strconv.Itoa(time.Now().Year()) },
 		"copyrightHolder": func() string {
 			return copyrightHolderString(g.Spec.Creator, g.Spec.OwnerName, g.Spec.Owner)
 		},
+		"endsSentence": endsSentence,
 		"modulePath": func() string {
 			if g.ModulePath != "" {
 				return g.ModulePath
@@ -395,7 +405,9 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"publicFlagAliases":            publicFlagAliases,
 		"flagChangedExpr":              flagChangedExpr,
 		"graphqlListParams":            graphqlListParams,
+		"graphqlLatestParams":          graphqlLatestParams,
 		"graphqlVariableType":          graphqlVariableType,
+		"hasGraphQLParam":              hasGraphQLParam,
 		"mcpInputName":                 mcpInputName,
 		"mcpToolInputParams":           mcpToolInputParams,
 		"mcpParamBindings":             mcpParamBindings,
@@ -411,6 +423,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		// Surfaced by hackernews retro #350 finding F6.
 		"endpointNeedsClientLimit":  endpointNeedsClientLimit,
 		"endpointClientSideFilters": endpointClientSideFilters,
+		"globalScopeParams":         globalScopeParams,
 		"envName":                   naming.EnvPrefix,
 		// endpointTemplateEnvName resolves the env-var name for a
 		// {placeholder} in EndpointTemplateVars. Returns the spec-declared
@@ -421,6 +434,11 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"endpointTemplateEnvName": func(placeholder string) string {
 			return s.EndpointTemplateEnvName(placeholder)
 		},
+		"globalScopeEnvName": func(param spec.Param) string {
+			return globalScopeEnvName(s.Name, param)
+		},
+		"globalScopeFallbackValue": globalScopeFallbackValue,
+		"paramHasEnvDefault":       paramHasEnvDefault,
 		// endpointTemplateDefault returns the spec-declared default value for
 		// a placeholder (e.g. server-URL variables' `default:` value), or ""
 		// when none. Templates branch on the empty case to skip the runtime
@@ -920,15 +938,16 @@ func (g *Generator) readmeData() *readmeTemplateData {
 }
 
 func (g *Generator) compactDescription() string {
-	candidates := []string{}
 	if g.Narrative != nil {
-		candidates = append(candidates, g.Narrative.Headline)
+		if desc := naming.AuthoredDescription(g.Narrative.Headline); desc != "" {
+			return desc
+		}
 	}
 	if g.Spec != nil {
-		candidates = append(candidates, g.Spec.CLIDescription, g.Spec.Description)
-	}
-	for _, candidate := range candidates {
-		if desc := naming.CompactDescription(candidate); desc != "" {
+		if desc := naming.AuthoredDescription(g.Spec.CLIDescription); desc != "" {
+			return desc
+		}
+		if desc := naming.CompactDescription(g.Spec.Description); desc != "" {
 			return desc
 		}
 	}
@@ -978,9 +997,9 @@ func (g *Generator) CatalogDisplayName() string {
 func (g *Generator) skillDescription() string {
 	switch {
 	case g.Narrative != nil && strings.TrimSpace(g.Narrative.Headline) != "":
-		return naming.CompactDescription(g.Narrative.Headline)
+		return naming.AuthoredDescription(g.Narrative.Headline)
 	case g.Spec != nil && strings.TrimSpace(g.Spec.CLIDescription) != "":
-		return naming.CompactDescription(g.Spec.CLIDescription)
+		return naming.AuthoredDescription(g.Spec.CLIDescription)
 	case g.Spec != nil && strings.TrimSpace(g.Spec.Description) != "":
 		return fmt.Sprintf("Printing Press CLI for %s. %s", g.proseName(), naming.CompactDescription(g.Spec.Description))
 	default:
@@ -1401,6 +1420,8 @@ func authEnvPlaceholderByName(envVarName string) string {
 		return "us-east-1"
 	case placeholder == "username" || strings.HasSuffix(placeholder, "_username"):
 		return "your-username"
+	case placeholder == "password" || strings.HasSuffix(placeholder, "_password"):
+		return "your-password"
 	case placeholder == "user_agent" || strings.HasSuffix(placeholder, "_user_agent"):
 		return "you@example.com (Your Tool Name)"
 	case placeholder == "cookies" || strings.HasSuffix(placeholder, "_cookies"):
@@ -1408,6 +1429,130 @@ func authEnvPlaceholderByName(envVarName string) string {
 	default:
 		return "your-token-here"
 	}
+}
+
+func requestAuthEnvVars(auth spec.AuthConfig) []spec.AuthEnvVar {
+	auth.NormalizeEnvVarSpecs("")
+	out := make([]spec.AuthEnvVar, 0, len(auth.EnvVarSpecs))
+	for _, envVar := range auth.EnvVarSpecs {
+		if envVar.IsRequestCredential() {
+			out = append(out, envVar)
+		}
+	}
+	return out
+}
+
+func requiredRequestAuthEnvVars(auth spec.AuthConfig) []spec.AuthEnvVar {
+	envVars := requestAuthEnvVars(auth)
+	out := make([]spec.AuthEnvVar, 0, len(envVars))
+	for _, envVar := range envVars {
+		if envVar.Required {
+			out = append(out, envVar)
+		}
+	}
+	return out
+}
+
+func optionalRequestAuthEnvVars(auth spec.AuthConfig) []spec.AuthEnvVar {
+	envVars := requestAuthEnvVars(auth)
+	out := make([]spec.AuthEnvVar, 0, len(envVars))
+	for _, envVar := range envVars {
+		if !envVar.Required {
+			out = append(out, envVar)
+		}
+	}
+	return out
+}
+
+func requiredRequestAuthEnvVarCount(auth spec.AuthConfig) int {
+	return len(requiredRequestAuthEnvVars(auth))
+}
+
+func requestAuthEnvVarCount(auth spec.AuthConfig) int {
+	return len(requestAuthEnvVars(auth))
+}
+
+func authSetTokenAvailable(auth spec.AuthConfig) bool {
+	return authSetTokenAvailableForRequiredCount(auth, requiredRequestAuthEnvVarCount(auth))
+}
+
+func authSetTokenAvailableForRequiredCount(auth spec.AuthConfig, requiredCount int) bool {
+	if strings.Contains(strings.ToLower(auth.Format), "basic ") {
+		return false
+	}
+	switch auth.Type {
+	case "api_key", "bearer_token":
+		return requiredCount == 1
+	default:
+		return false
+	}
+}
+
+func authErrorCheckHint(auth spec.AuthConfig) string {
+	switch auth.Type {
+	case "bearer_token", "oauth2", "oauth2_refresh":
+		return "check your token."
+	case "api_key":
+		if strings.Contains(strings.ToLower(auth.Format), "basic ") {
+			return "check your Basic credentials."
+		}
+		return "check your API key."
+	default:
+		return "check your API credentials."
+	}
+}
+
+func authSetupHint(auth spec.AuthConfig, cliName string) string {
+	switch auth.Type {
+	case "", "none":
+		return ""
+	case "cookie", "composed":
+		return fmt.Sprintf("Run '%s-pp-cli auth login --chrome' to refresh browser-session credentials.", cliName)
+	case "oauth2":
+		return fmt.Sprintf("Run '%s-pp-cli auth login' to re-authenticate.", cliName)
+	}
+
+	envVars := requiredRequestAuthEnvVars(auth)
+	if len(envVars) == 0 && auth.IsAuthEnvVarORCase() {
+		envVars = requestAuthEnvVars(auth)
+		exports := make([]string, 0, len(envVars))
+		for _, envVar := range envVars {
+			exports = append(exports, fmt.Sprintf(`export %s="%s"`, envVar.Name, authEnvPlaceholder(envVar)))
+		}
+		if len(exports) > 0 {
+			return "Set one of: " + strings.Join(exports, " or ")
+		}
+	}
+	if len(envVars) == 0 {
+		return fmt.Sprintf("Run '%s-pp-cli auth setup' for credential setup steps.", cliName)
+	}
+
+	exports := make([]string, 0, len(envVars))
+	for _, envVar := range envVars {
+		exports = append(exports, fmt.Sprintf(`%s="%s"`, envVar.Name, authEnvPlaceholder(envVar)))
+	}
+
+	if len(envVars) == 1 {
+		switch auth.Type {
+		case "bearer_token", "oauth2_refresh":
+			if authSetTokenAvailableForRequiredCount(auth, len(envVars)) {
+				return fmt.Sprintf("Set it with: %s-pp-cli auth set-token <token> or export %s", cliName, exports[0])
+			}
+			return fmt.Sprintf("Set it with: export %s", exports[0])
+		case "api_key":
+			if strings.Contains(strings.ToLower(auth.Format), "basic ") {
+				return fmt.Sprintf("Set the Basic credential with: export %s", exports[0])
+			}
+			return fmt.Sprintf("Set your API key with: export %s", exports[0])
+		default:
+			return fmt.Sprintf("Set credentials with: export %s", exports[0])
+		}
+	}
+
+	if strings.Contains(strings.ToLower(auth.Format), "basic ") {
+		return "Set Basic credentials with: export " + strings.Join(exports, " ")
+	}
+	return "Set credentials with: export " + strings.Join(exports, " ")
 }
 
 func authEnvDomainVendor(envNameUpper, placeholder string) string {
@@ -1923,6 +2068,7 @@ func (g *Generator) renderSingleFiles() error {
 		"golangci.yml.tmpl":                        ".golangci.yml",
 		"readme.md.tmpl":                           "README.md",
 		"agents.md.tmpl":                           "AGENTS.md",
+		"claude.md.tmpl":                           "CLAUDE.md",
 		"skill.md.tmpl":                            "SKILL.md",
 		"LICENSE.tmpl":                             "LICENSE",
 		"NOTICE.tmpl":                              "NOTICE",
@@ -1935,7 +2081,7 @@ func (g *Generator) renderSingleFiles() error {
 		}
 		var data any
 		switch tmplName {
-		case "readme.md.tmpl", "agents.md.tmpl", "skill.md.tmpl", "which.go.tmpl", "which_test.go.tmpl":
+		case "readme.md.tmpl", "agents.md.tmpl", "claude.md.tmpl", "skill.md.tmpl", "which.go.tmpl", "which_test.go.tmpl":
 			data = g.readmeData()
 		case "helpers.go.tmpl":
 			hFlags := computeHelperFlags(g.Spec)
@@ -3123,6 +3269,9 @@ func (g *Generator) schemaWithDependentParents() []TableDef {
 				if table.JSONOnlyFallback {
 					continue
 				}
+				if schema[i].ParentKeyColumn == "" {
+					schema[i].ParentKeyColumn = "parent_id"
+				}
 				hasParentID := false
 				for _, col := range table.Columns {
 					if col.Name == "parent_id" {
@@ -3216,6 +3365,7 @@ type visionRenderData struct {
 	GraphQLFieldPaths            map[string]string
 	AgentMoneyWorkflow           AgentMoneyWorkflow
 	HTMLSyncStub                 bool
+	HTMLPageModeResources        []criticalResourceEntry
 }
 
 type resourceIDFieldOverrideEntry struct {
@@ -3249,6 +3399,48 @@ func resourceIDFieldOverrideEntries(syncable []profiler.SyncableResource, depend
 	entries := make([]resourceIDFieldOverrideEntry, len(names))
 	for i, name := range names {
 		entries[i] = resourceIDFieldOverrideEntry{Name: name, Value: overrides[name]}
+	}
+	return entries
+}
+
+func htmlPageModeResourceEntries(api *spec.APISpec, syncable []profiler.SyncableResource, dependent []profiler.DependentResource) []criticalResourceEntry {
+	resources := map[string]bool{}
+	if api != nil {
+		var collect func(resourceMap map[string]spec.Resource)
+		collect = func(resourceMap map[string]spec.Resource) {
+			for resourceName, resource := range resourceMap {
+				name := spec.ToSnakeCase(resourceName)
+				for _, endpoint := range resource.Endpoints {
+					if endpoint.UsesHTMLResponse() && endpoint.HTMLExtract.EffectiveMode() == spec.HTMLExtractModePage {
+						resources[name] = true
+						break
+					}
+				}
+				collect(resource.SubResources)
+			}
+		}
+		collect(api.Resources)
+	}
+	for _, resource := range syncable {
+		if syncableResourceUsesHTMLPageMode(resource) {
+			resources[resource.Name] = true
+		}
+	}
+	for _, resource := range dependent {
+		if dependentResourceUsesHTMLPageMode(resource) {
+			resources[resource.Name] = true
+		}
+	}
+
+	names := make([]string, 0, len(resources))
+	for name := range resources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	entries := make([]criticalResourceEntry, len(names))
+	for i, name := range names {
+		entries[i] = criticalResourceEntry{Name: name}
 	}
 	return entries
 }
@@ -3297,6 +3489,15 @@ func paginationSupportedResources(syncable []profiler.SyncableResource, dependen
 	}
 	sort.Strings(names)
 	return names
+}
+
+func hasDefaultSyncResources(syncable []profiler.SyncableResource) bool {
+	for _, resource := range syncable {
+		if !resource.SkipDefaultSync {
+			return true
+		}
+	}
+	return false
 }
 
 func specDateTimeFieldNames(api *spec.APISpec) []string {
@@ -3374,6 +3575,7 @@ func (g *Generator) visionRenderData(schema []TableDef) visionRenderData {
 		GraphQLFieldPaths:            gqlFieldPaths,
 		AgentMoneyWorkflow:           detectAgentMoneyWorkflow(g.Spec, g.PromotedEndpointNames),
 		HTMLSyncStub:                 g.shouldEmitHTMLSyncStub(),
+		HTMLPageModeResources:        htmlPageModeResourceEntries(g.Spec, g.profile.SyncableResources, g.profile.DependentSyncResources),
 	}
 }
 
@@ -3882,6 +4084,7 @@ func (g *Generator) renderPromotedCommandFiles(promotedCommands []PromotedComman
 		}
 	}
 
+	novelChildrenByParent := g.novelFeatureChildrenByParent()
 	// Generate promoted top-level commands (user-friendly aliases for nested API commands)
 	// promotedCommands was computed earlier so promoted resources can replace their raw parents.
 	for _, pc := range promotedCommands {
@@ -3899,6 +4102,7 @@ func (g *Generator) renderPromotedCommandFiles(promotedCommands []PromotedComman
 			Resource          spec.Resource
 			FuncPrefix        string
 			IsReadOnly        bool
+			NovelChildren     []novelFeatureChildRender
 			*spec.APISpec
 		}{
 			PromotedName:  pc.PromotedName,
@@ -3918,6 +4122,7 @@ func (g *Generator) renderPromotedCommandFiles(promotedCommands []PromotedComman
 			Resource:          resource,
 			FuncPrefix:        pc.ResourceName,
 			IsReadOnly:        endpointIsReadCommand(pc.Endpoint, pc.EndpointName),
+			NovelChildren:     novelChildrenByParent[toKebab(pc.PromotedName)],
 			APISpec:           g.Spec,
 		}
 		promotedPath := filepath.Join("internal", "cli", safeResourceFileStem("promoted_"+pc.PromotedName)+".go")
@@ -4618,6 +4823,66 @@ func zeroValForParamRequired(name, t string, required bool, hasDefault bool) str
 
 func paramHasDefault(p spec.Param) bool {
 	return p.Default != nil
+}
+
+func paramHasEnvDefault(p spec.Param) bool {
+	return p.GlobalScope && primitiveKind(p.Type) == "string"
+}
+
+func globalScopeFallbackValue(p spec.Param) string {
+	if p.Default == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", p.Default)
+}
+
+func globalScopeEnvName(apiName string, p spec.Param) string {
+	name := p.PublicInputName()
+	if name == "" {
+		name = p.Name
+	}
+	placeholder := strings.ToUpper(strings.ReplaceAll(naming.FlagName(name), "-", "_"))
+	if placeholder == "" {
+		placeholder = "SCOPE"
+	}
+	return naming.EnvPrefix(apiName) + "_" + placeholder
+}
+
+func globalScopeParams(resources map[string]spec.Resource) []spec.Param {
+	resourceNames := make([]string, 0, len(resources))
+	for name := range resources {
+		resourceNames = append(resourceNames, name)
+	}
+	sort.Strings(resourceNames)
+
+	seen := map[string]struct{}{}
+	var out []spec.Param
+	for _, resourceName := range resourceNames {
+		resource := resources[resourceName]
+		endpointNames := make([]string, 0, len(resource.Endpoints))
+		for endpointName := range resource.Endpoints {
+			endpointNames = append(endpointNames, endpointName)
+		}
+		sort.Strings(endpointNames)
+		for _, endpointName := range endpointNames {
+			endpoint := resource.Endpoints[endpointName]
+			for _, param := range endpoint.Params {
+				if !paramHasEnvDefault(param) {
+					continue
+				}
+				key := param.WireName()
+				if key == "" {
+					key = param.Name
+				}
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, param)
+			}
+		}
+	}
+	return out
 }
 
 // paramIsConstDefault holds for single-value-enum params whose default
@@ -5570,6 +5835,9 @@ func endpointHasQueryFlags(endpoint spec.Endpoint) bool {
 // param does not falsely trip the guard.
 func endpointHasRequiredInput(endpoint spec.Endpoint) bool {
 	for _, p := range endpoint.Params {
+		if paramHasEnvDefault(p) {
+			continue
+		}
 		if p.Required && !p.Positional {
 			if truth, _ := template.IsTrue(p.Default); !truth {
 				return true
@@ -6179,6 +6447,12 @@ func exampleValue(p spec.Param) string {
 		return value
 	}
 
+	if p.Example != nil {
+		if s := stringifyDefault(p.Example); shellSafeSchemaExampleValue(s) {
+			return s
+		}
+	}
+
 	// Enum-constrained params: the API rejects anything outside the set,
 	// so prefer the first declared value over name-shape heuristics.
 	// This wins over name-based branches because a hypothetical
@@ -6187,6 +6461,16 @@ func exampleValue(p spec.Param) string {
 		if strings.TrimSpace(v) != "" {
 			return v
 		}
+	}
+
+	if p.Default != nil {
+		if s, ok := defaultSliceExampleValue(p.Default); ok && shellSafeSchemaExampleValue(s) {
+			return s
+		}
+	}
+
+	if value, ok := descriptionExampleValue(p.Description); ok {
+		return value
 	}
 
 	nameLower := strings.ToLower(p.Name)
@@ -6238,6 +6522,95 @@ func exampleValue(p spec.Param) string {
 		return "42"
 	}
 	return "example-value"
+}
+
+func descriptionExampleValue(description string) (string, bool) {
+	lower := strings.ToLower(description)
+	for _, marker := range []string{"e.g.", "eg.", "for example"} {
+		idx := descriptionExampleMarkerIndex(lower, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(description[idx+len(marker):])
+		rest = strings.TrimLeft(rest, ": \t")
+		if value := firstShellSafeDescriptionToken(rest); value != "" {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func descriptionExampleMarkerIndex(lower, marker string) int {
+	searchFrom := 0
+	for {
+		idx := strings.Index(lower[searchFrom:], marker)
+		if idx < 0 {
+			return -1
+		}
+		idx += searchFrom
+		if idx == 0 {
+			return idx
+		}
+		prev := rune(lower[idx-1])
+		if !unicode.IsLetter(prev) && !unicode.IsDigit(prev) {
+			return idx
+		}
+		searchFrom = idx + len(marker)
+	}
+}
+
+func defaultSliceExampleValue(v any) (string, bool) {
+	switch t := v.(type) {
+	case []string:
+		if len(t) == 0 {
+			return "", false
+		}
+		return stringifyDefault(t[0]), true
+	case []any:
+		if len(t) == 0 {
+			return "", false
+		}
+		return stringifyDefault(t[0]), true
+	default:
+		return "", false
+	}
+}
+
+func firstShellSafeDescriptionToken(s string) string {
+	for _, delimiter := range []string{",", ";", ".", "\n", "\r", " or ", " and "} {
+		if idx := strings.Index(s, delimiter); idx >= 0 {
+			s = s[:idx]
+		}
+	}
+	s = strings.Trim(s, " \t`'\"()[]{}")
+	if s == "" || strings.ContainsAny(s, " \t") {
+		return ""
+	}
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == ':' || r == '/' || r == '.' {
+			continue
+		}
+		return ""
+	}
+	return s
+}
+
+func shellSafeSchemaExampleValue(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s, " \t\n\r") {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == ':' || r == '/' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func exampleNeedsTODO(line string) bool {
+	return strings.Contains(line, "example-value")
 }
 
 func (g *Generator) exampleLine(commandPath, endpointName string, endpoint spec.Endpoint) string {
@@ -6814,6 +7187,29 @@ func graphqlListParams(endpoint spec.Endpoint) []spec.Param {
 	return params
 }
 
+func graphqlLatestParams(endpoint spec.Endpoint) []spec.Param {
+	params := make([]spec.Param, 0, len(endpoint.Params))
+	for _, p := range endpoint.Params {
+		if p.Positional || p.PathParam {
+			continue
+		}
+		if p.Name != "last" {
+			continue
+		}
+		params = append(params, p)
+	}
+	return params
+}
+
+func hasGraphQLParam(endpoint spec.Endpoint, name string) bool {
+	for _, p := range endpoint.Params {
+		if p.Name == name && !p.Positional && !p.PathParam {
+			return true
+		}
+	}
+	return false
+}
+
 func graphqlVariableType(p spec.Param) string {
 	var typ string
 	switch primitiveKind(p.Type) {
@@ -6828,7 +7224,7 @@ func graphqlVariableType(p spec.Param) string {
 	default:
 		typ = "String"
 	}
-	if p.Required || strings.EqualFold(p.Name, "first") {
+	if p.Required || strings.EqualFold(p.Name, "first") || strings.EqualFold(p.Name, "last") {
 		typ += "!"
 	}
 	return typ

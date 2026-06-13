@@ -2391,6 +2391,77 @@ paths:
 	assert.Equal(t, "api_token", parsed.Auth.Scheme, "selected scheme name must surface for downstream env-var derivation")
 }
 
+func TestSelectSecuritySchemeAPIKeyHeaderBeatsOAuth2Alternative(t *testing.T) {
+	t.Parallel()
+
+	spec := []byte(`openapi: "3.0.3"
+info:
+  title: Pipedrive
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+security:
+  - oauth: []
+  - api_key: []
+components:
+  securitySchemes:
+    oauth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://api.example.com/oauth/token
+          scopes:
+            read: read access
+    api_key:
+      type: apiKey
+      in: header
+      name: x-api-token
+paths:
+  /v1/deals:
+    get:
+      operationId: listDeals
+      responses: {"200": {description: ok}}
+`)
+
+	parsed, err := Parse(spec)
+	require.NoError(t, err)
+
+	assert.Equal(t, "api_key", parsed.Auth.Type, "standalone header apiKey must be preferred over OAuth2 alternatives")
+	assert.Equal(t, "api_key", parsed.Auth.Scheme)
+	assert.Equal(t, "header", parsed.Auth.In)
+	assert.Equal(t, "x-api-token", parsed.Auth.Header)
+	assert.Equal(t, []string{"PIPEDRIVE_API_KEY"}, parsed.Auth.EnvVars)
+
+	if testing.Short() {
+		t.Skip("generated CLI runtime coverage runs outside short mode")
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(parsed.Name))
+	gen := generator.New(parsed, outputDir)
+	require.NoError(t, gen.Generate())
+
+	clientSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	clientContent := string(clientSrc)
+	require.Contains(t, clientContent, `req.Header.Set("x-api-token", authHeader)`)
+	require.NotContains(t, clientContent, `req.Header.Set("Authorization", authHeader)`)
+
+	const runtimeTest = `package config
+
+import "testing"
+
+func TestHeaderAPIKeyAuthHeaderIsRaw(t *testing.T) {
+	cfg := &Config{PipedriveApiKey: "raw-token"}
+	if got := cfg.AuthHeader(); got != "raw-token" {
+		t.Fatalf("AuthHeader() = %q, want raw-token", got)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "config", "header_apikey_test.go"), []byte(runtimeTest), 0o644))
+	runGo(t, outputDir, "mod", "tidy")
+	runGo(t, outputDir, "test", "./internal/config", "-run", "TestHeaderAPIKeyAuthHeaderIsRaw")
+}
+
 func TestSelectSecuritySchemeRespectsRootSecurityFilter(t *testing.T) {
 	t.Parallel()
 
@@ -2566,6 +2637,51 @@ paths:
 
 	assert.Equal(t, "bearer_token", parsed.Auth.Type, "well-formed ROPC oauth2 must outrank co-declared apiKey")
 	assert.Equal(t, "ropcAuth", parsed.Auth.Scheme)
+}
+
+func TestSelectSecuritySchemeOAuth2ClientCredentialsBeatsOAuth2Password(t *testing.T) {
+	t.Parallel()
+
+	// When a spec offers separate OAuth2 machine and user-password schemes, keep
+	// the non-interactive client_credentials scheme ahead of deprecated ROPC.
+	specBytes := []byte(`openapi: "3.0.3"
+info:
+  title: OAuth2FlowPriority
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+security:
+  - ccAuth: []
+  - ropcAuth: []
+components:
+  securitySchemes:
+    ccAuth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://api.example.com/oauth/token
+          scopes:
+            read: read access
+    ropcAuth:
+      type: oauth2
+      flows:
+        password:
+          tokenUrl: https://api.example.com/oauth/token
+          scopes:
+            read: read access
+paths:
+  /v1/items:
+    get:
+      operationId: listItems
+      responses: {"200": {description: ok}}
+`)
+
+	parsed, err := Parse(specBytes)
+	require.NoError(t, err)
+
+	assert.Equal(t, "bearer_token", parsed.Auth.Type)
+	assert.Equal(t, "ccAuth", parsed.Auth.Scheme)
+	assert.Equal(t, spec.OAuth2GrantClientCredentials, parsed.Auth.OAuth2Grant)
 }
 
 func TestSkipUnderscoreFields(t *testing.T) {
@@ -3150,6 +3266,62 @@ func TestReclassifyPathParamDefaults(t *testing.T) {
 	assert.Equal(t, "PICK", params[2].Default, "enum default should be first value")
 }
 
+func TestParseParameterExamples(t *testing.T) {
+	parsed, err := Parse([]byte(`
+openapi: 3.1.0
+info:
+  title: Parameter Examples
+  version: 1.0.0
+paths:
+  /reports:
+    get:
+      operationId: listReports
+      parameters:
+        - name: parameterExample
+          in: query
+          required: true
+          example: from-parameter
+          schema:
+            type: string
+        - name: namedExample
+          in: query
+          required: true
+          examples:
+            beta:
+              value: from-named
+          schema:
+            type: string
+        - name: schemaExample
+          in: query
+          required: true
+          schema:
+            type: string
+            example: from-schema
+        - name: schemaExamples
+          in: query
+          required: true
+          schema:
+            type: string
+            examples:
+              - from-schema-list
+      responses:
+        '200':
+          description: ok
+`))
+	require.NoError(t, err)
+
+	params := parsed.Resources["reports"].Endpoints["list"].Params
+	byName := map[string]spec.Param{}
+	for _, param := range params {
+		byName[param.Name] = param
+	}
+
+	assert.Equal(t, "from-parameter", byName["parameterExample"].Example)
+	assert.Equal(t, "from-named", byName["namedExample"].Example)
+	assert.Equal(t, "from-schema", byName["schemaExample"].Example)
+	assert.Equal(t, "from-schema-list", byName["schemaExamples"].Example)
+}
+
 func TestParsePreservesDefaultedPathParamsDuringGlobalFilter(t *testing.T) {
 	data := []byte(`
 openapi: 3.0.0
@@ -3647,6 +3819,10 @@ paths:
           name: TenantFilter
           schema: {type: string}
         - in: query
+          name: workspaceId
+          required: true
+          schema: {type: string}
+        - in: query
           name: limit
           schema: {type: integer}
       responses: {"200": {description: ok}}
@@ -3658,6 +3834,10 @@ paths:
           name: TenantFilter
           schema: {type: string}
         - in: query
+          name: workspaceId
+          required: true
+          schema: {type: string}
+        - in: query
           name: limit
           schema: {type: integer}
       responses: {"200": {description: ok}}
@@ -3667,6 +3847,10 @@ paths:
       parameters:
         - in: query
           name: TenantFilter
+          schema: {type: string}
+        - in: query
+          name: workspaceId
+          required: true
           schema: {type: string}
         - in: query
           name: limit
@@ -3696,16 +3880,21 @@ paths:
 
 	for _, resourceName := range []string{"users", "mailboxes", "devices"} {
 		endpoint := parsed.Resources[resourceName].Endpoints["list"]
-		var tenant spec.Param
+		var tenant, workspace spec.Param
 		for _, param := range endpoint.Params {
 			if param.Name == "TenantFilter" {
 				tenant = param
-				break
+			}
+			if param.Name == "workspaceId" {
+				workspace = param
 			}
 		}
 		require.Equal(t, "TenantFilter", tenant.Name, "%s should keep TenantFilter", resourceName)
 		assert.True(t, tenant.Required)
 		assert.True(t, tenant.GlobalScope)
+		require.Equal(t, "workspaceId", workspace.Name, "%s should keep required workspaceId", resourceName)
+		assert.True(t, workspace.Required)
+		assert.True(t, workspace.GlobalScope)
 		for _, param := range endpoint.Params {
 			assert.NotEqual(t, "limit", param.Name, "%s should still filter non-scope global params", resourceName)
 		}
@@ -4936,6 +5125,29 @@ paths:
 `,
 			expected: "",
 		},
+		{
+			name: "HATEOAS placeholder URL in scheme description is rejected",
+			yaml: `openapi: "3.0.3"
+info:
+  title: Example
+  version: "1.0.0"
+servers:
+  - url: https://api.example.com
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-apikey
+      description: "Get your API key at https://en.wikipedia.org/wiki/HATEOAS"
+paths:
+  /ping:
+    get:
+      responses:
+        "200": { description: OK }
+`,
+			expected: "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -4970,6 +5182,11 @@ func TestFirstHTTPSURLRejectsPlaceholders(t *testing.T) {
 			in:   "https://api.example.com/v1/{tenant}/keys",
 			want: "",
 		},
+		{
+			name: "HATEOAS placeholder",
+			in:   "Get your key at https://en.wikipedia.org/wiki/HATEOAS",
+			want: "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -4978,6 +5195,37 @@ func TestFirstHTTPSURLRejectsPlaceholders(t *testing.T) {
 			assert.Equal(t, tc.want, firstHTTPSURL(tc.in))
 		})
 	}
+}
+
+func TestOpenAPIWebsiteURLRejectsHATEOASPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	yamlSpec := []byte(`openapi: "3.0.3"
+info:
+  title: Example
+  version: "1.0.0"
+externalDocs:
+  url: https://en.wikipedia.org/wiki/HATEOAS
+servers:
+  - url: https://api.example.com
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+paths:
+  /ping:
+    get:
+      responses:
+        "200":
+          description: OK
+`)
+
+	parsed, err := Parse(yamlSpec)
+	require.NoError(t, err)
+	assert.Empty(t, parsed.WebsiteURL)
+	assert.Empty(t, parsed.Auth.KeyURL)
 }
 
 func TestOpenAPIAuthEnvVarsPopulateRichDefaults(t *testing.T) {
@@ -10479,6 +10727,7 @@ func TestDetectPaginationPreservesCursorParamCase(t *testing.T) {
 		{"google camelCase pageToken", "pageToken", "pageToken", "page_token"},
 		{"snake_case page_token", "page_token", "page_token", "page_token"},
 		{"plain after", "after", "after", "cursor"},
+		{"snake_case next_token", "next_token", "next_token", "cursor"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

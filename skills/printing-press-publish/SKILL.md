@@ -22,6 +22,7 @@ Publish a generated CLI from your local library to the [printing-press-library](
 /printing-press publish notion
 /printing-press publish notion --from-polish
 /printing-press publish notion --skip-live-test=auth-unavailable
+/printing-press publish notion --blocked-api-journal notion
 /printing-press publish
 ```
 
@@ -42,6 +43,13 @@ resolving the CLI name. The marker is not a second confirmation and is not
 passed to `cli-printing-press`; it only preserves standalone polish's old
 post-publish retro offer after the fresh-turn publish completes.
 
+If the request includes `--blocked-api-journal`, enter **Blocked API Journal
+Mode** below instead of the normal printed-CLI publish flow. This mode may be
+invoked from `/printing-press`'s hold-path menu after the user explicitly chose
+"Add to blocked-API journal"; that parent menu choice is sufficient user
+authorization for the public-library journal write. Do not require a second
+fresh-turn invocation for this journal-only mode.
+
 If the fresh user-authored request includes `--skip-live-test=<reason>`, record
 the exact non-empty reason as `SKIP_LIVE_TEST_REASON` and remove the flag before
 resolving the CLI name. This is the only supported escape valve for the
@@ -58,6 +66,101 @@ workflows. The library's `Fail on changes to generated artifacts` check in
 `verify-library-conventions.yml` hard-fails any PR — fork or same-repo — whose
 diff against base touches `registry.json` or `cli-skills/pp-*/SKILL.md`, so a
 publish that includes either is pre-rejected before review.
+
+The public library also owns per-CLI release accounting. Do not manually bump
+`CHANGELOG.md`, `.printing-press-release.json`, or runtime `var version = ...`
+for a publish PR. Fresh printed CLIs may include blank release-ledger skeletons;
+the library's post-merge workflow assigns the final `YYYY.M.N` release and
+stamps the runtime version after merge. When replacing an existing public
+library CLI, preserve its existing release-ledger files so changelog history is
+not lost in the reprint PR.
+
+`blocked-apis.json` is different: it is a hand-maintained public-library journal,
+not a generated registry surface. Journal-only PRs may edit `blocked-apis.json`
+and must not stage `library/`, `registry.json`, README catalog cells, or
+`cli-skills/`.
+
+## Blocked API Journal Mode
+
+Use this mode only when the invocation includes `--blocked-api-journal`. It
+records a held `/printing-press` attempt whose blocker is likely to repeat for
+other users until a machine or upstream issue changes.
+
+Required fields from the caller:
+
+- `slug`: canonical API slug, not the CLI binary name.
+- `attempted_at`: `YYYY-MM-DD`.
+- `verdict`: `hold`.
+- `reason`: concise blocker reason, with no secrets, local paths, cookies,
+  tokens, or account-specific details.
+- `blocking_issue`: Printing Press issue number if known, otherwise `null`.
+- `permanent`: boolean.
+
+If the caller did not provide one of these fields, infer only safe values from
+the current run context. If `reason` is missing or vague, stop and ask for one
+specific blocker sentence; do not write an unhelpful journal entry.
+
+Run the normal Setup, Configuration, scoped clone cleanup, and GitHub auth
+checks, then prepare the public-library clone exactly as the normal publish
+flow does: fork if needed, ensure `upstream` points to
+`mvanhorn/printing-press-library`, fetch `upstream`, and reset the clone to
+`upstream/main` before editing.
+
+Then update only `$PUBLISH_REPO_DIR/blocked-apis.json`:
+
+```bash
+cd "$PUBLISH_REPO_DIR"
+if [ ! -f blocked-apis.json ]; then
+  printf '[]\n' > blocked-apis.json
+fi
+jq --arg slug "<api-slug>" \
+   --arg attempted_at "<YYYY-MM-DD>" \
+   --arg verdict "hold" \
+   --arg reason "<reason>" \
+   --argjson blocking_issue '<number-or-null>' \
+   --argjson permanent '<true-or-false>' '
+  (if type == "array" then . else [] end)
+  | map(select(.slug != $slug))
+  + [{
+      slug: $slug,
+      attempted_at: $attempted_at,
+      verdict: $verdict,
+      reason: $reason,
+      blocking_issue: $blocking_issue,
+      permanent: $permanent
+    }]
+  | sort_by(.slug)
+' blocked-apis.json > blocked-apis.json.tmp || {
+  rm -f blocked-apis.json.tmp
+  echo "Error: jq failed to update blocked-apis.json"
+  exit 1
+}
+if ! jq empty blocked-apis.json.tmp; then
+  rm -f blocked-apis.json.tmp
+  echo "Error: blocked-apis.json update produced invalid JSON"
+  exit 1
+fi
+mv blocked-apis.json.tmp blocked-apis.json
+```
+
+Create a journal branch and PR:
+
+```bash
+git checkout -B chore/blocked-api-<api-slug>
+git add blocked-apis.json
+git commit -m "chore(<api-slug>): journal blocked API"
+git push --force-with-lease -u origin chore/blocked-api-<api-slug>
+```
+
+Open the PR against `mvanhorn/printing-press-library` with a body that includes:
+
+- the held API slug and reason
+- whether the block is permanent or tied to `blocking_issue`
+- the expected Phase 0 behavior: future `/printing-press <api-slug>` runs warn
+  before repeating the attempt
+
+After the PR is open, report the URL and stop. Do not continue into normal
+printed-CLI package, live-test, registry, or skill-mirror steps.
 
 ## Setup
 
@@ -227,7 +330,8 @@ Read `.printing-press.json` from the resolved CLI directory.
 3. If neither provides a category, present the full list via AskUserQuestion:
    - developer-tools, monitoring, cloud, project-management
    - productivity, social-and-messaging, sales-and-crm, marketing
-   - payments, auth, commerce, ai, media-and-entertainment, devices, other
+   - payments, auth, commerce, ai, food-and-dining, health, maps, media-and-entertainment, devices, other
+   - travel
 
 ## Step 4: Validate
 
@@ -585,14 +689,52 @@ Parse the JSON result. Note the `staged_dir`, `module_path`, `manuscripts_includ
 
 `publish package` performs the mandatory vendor-prefix secret scan over the staged CLI, including copied manuscripts, before returning success. If it reports `vendor-prefix tokens detected`, stop and remove or redact the reported file:line findings before retrying. This is a hard gate and does not depend on `gitleaks`, `trufflehog`, or destination-repo push protection.
 
-Then copy the staged CLI into the publish repo, replacing any existing version:
+Then copy the staged CLI into the publish repo, replacing any existing version
+while preserving the public library's release ledger files when this is a
+reprint:
 
 ```bash
-# Remove existing version (handles category changes)
-rm -rf "$PUBLISH_REPO_DIR/library"/*/"<api-slug>"
+STAGED_CLI_DIR="$STAGING_DIR/library/<category>/<api-slug>"
+DEST_CATEGORY_DIR="$PUBLISH_REPO_DIR/library/<category>"
+DEST_CLI_DIR="$DEST_CATEGORY_DIR/<api-slug>"
 
-# Copy staged CLI into publish repo (slug-keyed directory)
-cp -r "$STAGING_DIR/library/<category>/<api-slug>" "$PUBLISH_REPO_DIR/library/<category>/<api-slug>"
+if [ ! -d "$STAGED_CLI_DIR" ]; then
+  echo "missing staged CLI directory: $STAGED_CLI_DIR" >&2
+  exit 1
+fi
+mkdir -p "$DEST_CATEGORY_DIR"
+
+# Preserve release-ledger files from the current public-library entry before
+# removing it. New CLIs keep the blank skeletons produced by publish package;
+# reprints keep existing changelog history and release metadata until the
+# library's post-merge workflow stamps the next release.
+RELEASE_LEDGER_TMP="$(mktemp -d)"
+PUBLISH_SWAP_DIR="$(mktemp -d "$DEST_CATEGORY_DIR/.<api-slug>.XXXXXX")"
+trap 'rm -rf "$RELEASE_LEDGER_TMP" "$PUBLISH_SWAP_DIR"' EXIT
+for LEDGER_FILE in CHANGELOG.md .printing-press-release.json; do
+  EXISTING_LEDGER="$(find "$PUBLISH_REPO_DIR/library" -mindepth 3 -maxdepth 3 -path "*/<api-slug>/$LEDGER_FILE" -print -quit)"
+  if [ -n "$EXISTING_LEDGER" ]; then
+    cp "$EXISTING_LEDGER" "$RELEASE_LEDGER_TMP/$LEDGER_FILE"
+  fi
+done
+
+# Copy staged CLI into a same-category swap dir before deleting the current
+# public-library entry. This keeps a failed copy from leaving the publish repo
+# with the old CLI removed.
+cp -R "$STAGED_CLI_DIR/." "$PUBLISH_SWAP_DIR/"
+
+for LEDGER_FILE in CHANGELOG.md .printing-press-release.json; do
+  if [ -f "$RELEASE_LEDGER_TMP/$LEDGER_FILE" ]; then
+    cp "$RELEASE_LEDGER_TMP/$LEDGER_FILE" "$PUBLISH_SWAP_DIR/$LEDGER_FILE"
+  fi
+done
+
+# Remove existing version (handles category changes), then atomically install
+# the prepared replacement within the destination category.
+rm -rf "$PUBLISH_REPO_DIR/library"/*/"<api-slug>"
+mv "$PUBLISH_SWAP_DIR" "$DEST_CLI_DIR"
+rm -rf "$RELEASE_LEDGER_TMP"
+trap - EXIT
 
 # Remove root-level binaries (should not be committed). publish package
 # already strips these before the copy; this rm -f is belt-and-suspenders
@@ -625,7 +767,9 @@ fi
 # artifacts` check in `verify-library-conventions.yml` hard-fails any PR
 # whose diff against base touches these files, regardless of fork vs
 # same-repo origin. The library no longer has an in-PR auto-fix path;
-# do not re-introduce a mirror or registry regen here.
+# do not re-introduce a mirror or registry regen here. Also do NOT hand-update
+# CHANGELOG.md, .printing-press-release.json, or runtime version strings for
+# release accounting; the library release-ledger workflow owns those post-merge.
 
 # Verify this changed/new CLI builds and has no reachable Go vulnerabilities from the publish repo
 cd "$PUBLISH_REPO_DIR/library/<category>/<api-slug>" \

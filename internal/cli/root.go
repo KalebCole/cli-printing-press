@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -95,6 +96,7 @@ func NewRootCommand(commandName string) *cobra.Command {
 	rootCmd.AddCommand(newPublishCmd())
 	rootCmd.AddCommand(newPolishCmd())
 	rootCmd.AddCommand(newWorkflowVerifyCmd())
+	rootCmd.AddCommand(newApifyActorAuditCmd())
 	rootCmd.AddCommand(newShipcheckCmd())
 	rootCmd.AddCommand(newLockCmd())
 	rootCmd.AddCommand(newMCPAuditCmd())
@@ -135,6 +137,7 @@ func newGenerateCmd() *cobra.Command {
 	var planFile string
 	var trafficAnalysisPath string
 	var authPreference string
+	var namePrefix bool
 	var mcpOrchestration string
 	var mcpTransport []string
 	var mcpEndpointTools string
@@ -212,12 +215,12 @@ func newGenerateCmd() *cobra.Command {
 				}
 
 				if snapshotDir != "" {
-					if err := finalizeForceMerge(snapshotDir, absOut, docYAML); err != nil {
+					if err := finalizeForceMerge(snapshotDir, absOut, docYAML, validate); err != nil {
 						return err
 					}
 				}
 
-				runID := pipeline.DeriveRunIDFromResearchDir(researchDir)
+				runID := pipeline.ResolveRunIDFromResearchDir(researchDir)
 				if runID == "" {
 					fmt.Fprintln(os.Stderr, "warning: could not derive run_id from --research-dir; phase5 dogfood acceptance will refuse to write without it")
 				}
@@ -295,7 +298,7 @@ func newGenerateCmd() *cobra.Command {
 					// SpecChecksum, so the cross-spec guard naturally lands
 					// on the defensive full-merge path. Pass nil so any
 					// manifest hash that does exist still gates merge mode.
-					if err := finalizeForceMerge(snapshotDir, absOut, nil); err != nil {
+					if err := finalizeForceMerge(snapshotDir, absOut, nil, validate); err != nil {
 						return err
 					}
 				}
@@ -350,7 +353,7 @@ func newGenerateCmd() *cobra.Command {
 						return err
 					}
 					if snapshotDir != "" {
-						if err := finalizeForceMerge(snapshotDir, absOut, archivedDeviceSpec); err != nil {
+						if err := finalizeForceMerge(snapshotDir, absOut, archivedDeviceSpec, validate); err != nil {
 							return err
 						}
 					}
@@ -394,7 +397,8 @@ func newGenerateCmd() *cobra.Command {
 				openapi.SetMaxEndpointsPerResource(maxEndpointsPerResource)
 			}
 
-			openAPIParseAuthPref := openAPIAuthPreferenceForGenerate(authPreference, cliName, specFiles, specURL)
+			authPreferenceManifestDir := openAPIAuthPreferenceManifestDir(outputDir, cliName, specFiles, researchDir, singleSpecData)
+			openAPIParseAuthPref := openAPIAuthPreferenceForGenerate(authPreference, cliName, specFiles, specURL, authPreferenceManifestDir)
 
 			var specs []*spec.APISpec
 			var specRawBytes [][]byte // raw spec data for archiving
@@ -455,7 +459,7 @@ func newGenerateCmd() *cobra.Command {
 				if cliName == "" {
 					return &ExitError{Code: ExitInputError, Err: fmt.Errorf("--name is required when using multiple specs")}
 				}
-				apiSpec = mergeSpecs(specs, cliName)
+				apiSpec = mergeSpecsWithOptions(specs, cliName, mergeSpecOptions{NamePrefix: namePrefix})
 			}
 
 			if err := applyGenerateSpecFlags(apiSpec, specSource, "", category, clientPattern, httpTransport, owner, generateMCPFlagOverrides{
@@ -495,7 +499,7 @@ func newGenerateCmd() *cobra.Command {
 				if len(specRawBytes) > 0 {
 					primarySpec = specRawBytes[0]
 				}
-				if err := finalizeForceMerge(snapshotDir, absOut, primarySpec); err != nil {
+				if err := finalizeForceMerge(snapshotDir, absOut, primarySpec, validate); err != nil {
 					return err
 				}
 			}
@@ -517,25 +521,26 @@ func newGenerateCmd() *cobra.Command {
 				}
 			}
 
-			runID := pipeline.DeriveRunIDFromResearchDir(researchDir)
+			runID := pipeline.ResolveRunIDFromResearchDir(researchDir)
 			if runID == "" {
 				fmt.Fprintln(os.Stderr, "warning: could not derive run_id from --research-dir; phase5 dogfood acceptance will refuse to write without it")
 			}
 			if err := pipeline.WriteManifestForGenerate(pipeline.GenerateManifestParams{
-				APIName:       apiSpec.Name,
-				SpecSrcs:      specFiles,
-				SpecURL:       specURL,
-				OutputDir:     absOut,
-				Description:   generateResult.CatalogDescription,
-				DisplayName:   generateResult.DisplayName,
-				Creator:       apiSpec.Creator,
-				Contributors:  apiSpec.Contributors,
-				Owner:         apiSpec.Owner,
-				Printer:       apiSpec.Printer,
-				PrinterName:   apiSpec.PrinterName,
-				RunID:         runID,
-				Spec:          apiSpec,
-				NovelFeatures: generateResult.NovelFeatures,
+				APIName:        apiSpec.Name,
+				SpecSrcs:       specFiles,
+				SpecURL:        specURL,
+				OutputDir:      absOut,
+				Description:    generateResult.CatalogDescription,
+				DisplayName:    generateResult.DisplayName,
+				Creator:        apiSpec.Creator,
+				Contributors:   apiSpec.Contributors,
+				Owner:          apiSpec.Owner,
+				Printer:        apiSpec.Printer,
+				PrinterName:    apiSpec.PrinterName,
+				RunID:          runID,
+				Spec:           apiSpec,
+				AuthPreference: openAPIParseAuthPref,
+				NovelFeatures:  generateResult.NovelFeatures,
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not write manifest: %v\n", err)
 			}
@@ -596,6 +601,7 @@ func newGenerateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&planFile, "plan", "", "Path to a markdown plan document for plan-driven generation (instead of --spec)")
 	cmd.Flags().StringVar(&trafficAnalysisPath, "traffic-analysis", "", "Path to browser-sniff traffic-analysis.json for advisory generation context")
 	cmd.Flags().StringVar(&authPreference, "auth-preference", "", "Preferred securityScheme name from the spec (overrides default selection and any catalog auth_preference; useful when a spec advertises multiple schemes such as OAuth2 + HTTP Basic and you want the simpler one). When omitted, a matching embedded catalog entry's auth_preference applies for OpenAPI parsing.")
+	cmd.Flags().BoolVar(&namePrefix, "name-prefix", false, "Prefix resource command names with their source spec name when merging multiple specs")
 
 	return cmd
 }
@@ -1117,17 +1123,46 @@ func parseOpenAPISpec(specFile string, data []byte, opts openapi.ParseOptions) (
 }
 
 // openAPIAuthPreferenceForGenerate resolves AuthPreference for openapi.ParseWithOptions.
-// Explicit --auth-preference wins; otherwise a matching catalog entry's auth_preference
-// is used so catalog-driven generates pick the intended scheme before spec enrichment.
-func openAPIAuthPreferenceForGenerate(cliAuthPref, cliName string, specFiles []string, specURL string) string {
+// Explicit --auth-preference wins; otherwise a matching catalog entry's
+// auth_preference is used so catalog-driven generates pick the intended scheme
+// before spec enrichment. Existing same-directory manifests are the final
+// durable fallback for reprints of non-catalog CLIs.
+func openAPIAuthPreferenceForGenerate(cliAuthPref, cliName string, specFiles []string, specURL string, outputDir string) string {
 	if s := strings.TrimSpace(cliAuthPref); s != "" {
 		return s
 	}
 	entry := lookupCatalogEntryForGenerateSpec(strings.TrimSpace(cliName), catalogSpecLookupRefs(specFiles, specURL))
-	if entry == nil {
+	if entry != nil {
+		if pref := strings.TrimSpace(entry.AuthPreference); pref != "" {
+			return pref
+		}
+	}
+	if strings.TrimSpace(outputDir) == "" {
 		return ""
 	}
-	return strings.TrimSpace(entry.AuthPreference)
+	if manifest, err := pipeline.ReadCLIManifest(outputDir); err == nil {
+		return strings.TrimSpace(manifest.AuthPreference)
+	}
+	return ""
+}
+
+func openAPIAuthPreferenceManifestDir(outputDir, cliName string, specFiles []string, researchDir string, singleSpecData []byte) string {
+	if strings.TrimSpace(outputDir) != "" {
+		return outputDir
+	}
+	name := strings.TrimSpace(cliName)
+	if name == "" {
+		name = pipeline.LoadAPINameFromResearchDir(researchDir)
+	}
+	if name == "" && len(specFiles) == 1 && len(singleSpecData) > 0 && openapi.IsOpenAPI(singleSpecData) {
+		if parsed, err := parseOpenAPISpec(specFiles[0], singleSpecData, openapi.ParseOptions{Lenient: true}); err == nil {
+			name = parsed.Name
+		}
+	}
+	if name == "" {
+		return ""
+	}
+	return pipeline.DefaultOutputDir(name)
 }
 
 // archiveSpecBytes picks the bytes and filename for the spec snapshot that
@@ -1168,6 +1203,14 @@ func archiveSpecBytes(apiSpec *spec.APISpec, specs []*spec.APISpec, specRawBytes
 }
 
 func mergeSpecs(specs []*spec.APISpec, name string) *spec.APISpec {
+	return mergeSpecsWithOptions(specs, name, mergeSpecOptions{})
+}
+
+type mergeSpecOptions struct {
+	NamePrefix bool
+}
+
+func mergeSpecsWithOptions(specs []*spec.APISpec, name string, opts mergeSpecOptions) *spec.APISpec {
 	if len(specs) == 1 {
 		return specs[0]
 	}
@@ -1220,8 +1263,15 @@ func mergeSpecs(specs []*spec.APISpec, name string) *spec.APISpec {
 				resource = resourceWithMergedSpecBaseURL(resource, s.BaseURL, merged.BaseURL)
 			}
 			key := multiSpecResourceName(s, resourceName, sharedPathPrefix)
-			if _, exists := merged.Resources[key]; exists {
-				key = s.Name + "-" + resourceName
+			if opts.NamePrefix {
+				key = prefixedMultiSpecResourceName(s, resourceName)
+			}
+			if existing, exists := merged.Resources[key]; exists {
+				if !opts.NamePrefix && resourceEndpointsCoveredBy(existing, resource) {
+					continue
+				}
+				key = prefixedMultiSpecResourceName(s, resourceName)
+				key = uniqueMultiSpecResourceName(merged.Resources, key)
 			}
 			resource = rewriteDefaultResourceDescription(resource, resourceName, key)
 			if key != resourceName {
@@ -1244,6 +1294,27 @@ func mergeSpecs(specs []*spec.APISpec, name string) *spec.APISpec {
 	}
 
 	return merged
+}
+
+func prefixedMultiSpecResourceName(s *spec.APISpec, resourceName string) string {
+	specName := strings.Trim(strings.TrimSpace(s.Name), "-")
+	resourceName = strings.Trim(strings.TrimSpace(resourceName), "-")
+	if specName == "" || resourceName == "" || specName == resourceName || strings.HasPrefix(resourceName, specName+"-") {
+		return resourceName
+	}
+	return specName + "-" + resourceName
+}
+
+func uniqueMultiSpecResourceName(resources map[string]spec.Resource, preferred string) string {
+	if _, exists := resources[preferred]; !exists {
+		return preferred
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", preferred, i)
+		if _, exists := resources[candidate]; !exists {
+			return candidate
+		}
+	}
 }
 
 func mergeMultiSpecAuth(specs []*spec.APISpec) spec.AuthConfig {
@@ -1470,6 +1541,48 @@ func rewriteEndpointResourceRef(ref string, resourceRenames map[string]string) s
 		return renamed + "." + rest
 	}
 	return ref
+}
+
+func resourceEndpointsCoveredBy(existing, incoming spec.Resource) bool {
+	existingSignatures := resourceEndpointSignatures(existing)
+	incomingSignatures := resourceEndpointSignatures(incoming)
+	if len(existingSignatures) == 0 || len(incomingSignatures) == 0 {
+		return false
+	}
+	for signature := range incomingSignatures {
+		if _, ok := existingSignatures[signature]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func resourceEndpointSignatures(resource spec.Resource) map[string]struct{} {
+	signatures := map[string]struct{}{}
+	addResourceEndpointSignatures(signatures, resource)
+	return signatures
+}
+
+func addResourceEndpointSignatures(signatures map[string]struct{}, resource spec.Resource) {
+	for _, endpoint := range resource.Endpoints {
+		signatures[endpointSignature(resource, endpoint)] = struct{}{}
+	}
+	for _, sub := range resource.SubResources {
+		if sub.BaseURL == "" {
+			sub.BaseURL = resource.BaseURL
+		}
+		addResourceEndpointSignatures(signatures, sub)
+	}
+}
+
+func endpointSignature(resource spec.Resource, endpoint spec.Endpoint) string {
+	baseURL := strings.TrimRight(strings.TrimSpace(endpoint.BaseURL), "/")
+	if baseURL == "" {
+		baseURL = strings.TrimRight(strings.TrimSpace(resource.BaseURL), "/")
+	}
+	method := strings.ToUpper(strings.TrimSpace(endpoint.Method))
+	path := strings.TrimRight(strings.TrimSpace(endpoint.Path), "/")
+	return method + " " + baseURL + " " + path
 }
 
 func multiSpecResourceName(s *spec.APISpec, resourceName string, sharedPathPrefix []string) string {
@@ -1794,13 +1907,18 @@ func claimOrForce(absOut string, force bool, explicitOutput bool) (resolvedAbsOu
 // one preserves hand-edits consistently — discarding snapshotDir after
 // generation would silently lose user work and leave an orphan that blocks
 // future --force runs.
-func finalizeForceMerge(snapshotDir, freshDir string, currentSpecBytes []byte) error {
+func finalizeForceMerge(snapshotDir, freshDir string, currentSpecBytes []byte, validate bool) error {
 	gomodMerged, err := mergeForceSnapshot(snapshotDir, freshDir, currentSpecBytes)
 	if err != nil {
 		return &ExitError{Code: ExitGenerationError, Err: err}
 	}
 	if gomodMerged {
 		retidyAfterMerge(freshDir)
+	}
+	if validate {
+		if err := validatePostMergeBuild(freshDir); err != nil {
+			return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("validating post-merge generated project: %w; snapshot preserved at %s", err, snapshotDir)}
+		}
 	}
 	if removeErr := os.RemoveAll(snapshotDir); removeErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not remove snapshot dir %s: %v\n", snapshotDir, removeErr)
@@ -1826,12 +1944,17 @@ func finalizeForceMerge(snapshotDir, freshDir string, currentSpecBytes []byte) e
 // error includes the snapshot path so the user can recover manually with
 // `rm -rf <freshDir> && mv <snapshotDir> <freshDir>`.
 func mergeForceSnapshot(snapshotDir, freshDir string, currentSpecBytes []byte) (gomodMerged bool, err error) {
-	report, err := regenmerge.Classify(snapshotDir, freshDir, regenmerge.Options{Force: true})
+	novelOnly := !forceRegenSpecHashMatches(snapshotDir, currentSpecBytes)
+	baseDir, cleanupBase := synthesizeForceRegenBase(snapshotDir, currentSpecBytes, novelOnly)
+	if cleanupBase != nil {
+		defer cleanupBase()
+	}
+
+	classifyOpts := regenmerge.Options{Force: true, BaseDir: baseDir}
+	report, err := regenmerge.Classify(snapshotDir, freshDir, classifyOpts)
 	if err != nil {
 		return false, fmt.Errorf("classifying snapshot vs fresh: %w; snapshot preserved at %s", err, snapshotDir)
 	}
-
-	novelOnly := !forceRegenSpecHashMatches(snapshotDir, currentSpecBytes)
 
 	mergeOpts := regenmerge.Options{Force: true, NovelOnly: novelOnly}
 	if err := regenmerge.MergeIntoFreshTree(snapshotDir, freshDir, report, mergeOpts); err != nil {
@@ -1859,6 +1982,86 @@ func mergeForceSnapshot(snapshotDir, freshDir string, currentSpecBytes []byte) (
 	return report.GoMod != nil && report.GoMod.Merged, nil
 }
 
+func synthesizeForceRegenBase(snapshotDir string, currentSpecBytes []byte, novelOnly bool) (string, func()) {
+	if novelOnly || len(currentSpecBytes) == 0 {
+		return "", nil
+	}
+	manifest, err := pipeline.ReadCLIManifest(snapshotDir)
+	if err != nil {
+		return "", nil
+	}
+	priorVersion := strings.TrimSpace(manifest.PrintingPressVersion)
+	if priorVersion == "" || sameSemver(priorVersion, version.Version) {
+		return "", nil
+	}
+	if !validPrintingPressVersion(priorVersion) {
+		fmt.Fprintf(os.Stderr, "warning: cannot synthesize force-regen base from invalid printing_press_version %q\n", priorVersion)
+		return "", nil
+	}
+
+	tmp, err := os.MkdirTemp("", "printing-press-force-base-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot create force-regen base tempdir: %v\n", err)
+		return "", nil
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	specPath := filepath.Join(tmp, "spec.yaml")
+	baseDir := filepath.Join(tmp, "base")
+	if err := os.WriteFile(specPath, currentSpecBytes, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot write force-regen base spec: %v\n", err)
+		cleanup()
+		return "", nil
+	}
+	moduleVersion := strings.TrimPrefix(priorVersion, "v")
+	moduleVersion = "v" + moduleVersion
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "run", forceRegenCommandModulePath(moduleVersion)+"@"+moduleVersion,
+		"generate", "--spec", specPath, "--output", baseDir, "--validate=false")
+	fmt.Fprintf(os.Stderr, "Synthesizing force-regen base with cli-printing-press %s (this may take a moment)...\n", moduleVersion)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Fprintf(os.Stderr, "warning: force-regen base synthesis with cli-printing-press %s timed out; falling back to two-way merge\n", moduleVersion)
+		cleanup()
+		return "", nil
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: force-regen base synthesis with cli-printing-press %s failed: %v\n%s", moduleVersion, err, out)
+		cleanup()
+		return "", nil
+	}
+	return baseDir, cleanup
+}
+
+func sameSemver(a, b string) bool {
+	return strings.TrimPrefix(strings.TrimSpace(a), "v") == strings.TrimPrefix(strings.TrimSpace(b), "v")
+}
+
+var printingPressVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$`)
+
+func validPrintingPressVersion(v string) bool {
+	return printingPressVersionPattern.MatchString(strings.TrimSpace(v))
+}
+
+func forceRegenCommandModulePath(moduleVersion string) string {
+	major := printingPressMajor(moduleVersion)
+	base := "github.com/mvanhorn/cli-printing-press"
+	if major >= 2 {
+		base += "/v" + strconv.Itoa(major)
+	}
+	return base + "/cmd/cli-printing-press"
+}
+
+func printingPressMajor(moduleVersion string) int {
+	v := strings.TrimPrefix(strings.TrimSpace(moduleVersion), "v")
+	majorText, _, _ := strings.Cut(v, ".")
+	major, err := strconv.Atoi(majorText)
+	if err != nil {
+		return 0
+	}
+	return major
+}
+
 // retidyAfterMerge re-runs `go mod tidy` against dir so go.sum picks up
 // hashes for any requires the merge added. Generation's prior tidy ran
 // against fresh's go.mod before merge, so any preserved require from the
@@ -1872,6 +2075,21 @@ func retidyAfterMerge(dir string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: post-merge `go mod tidy` failed: %v\n%s", err, out)
 	}
+}
+
+func validatePostMergeBuild(dir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "build", "./...")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("go build ./... timed out after 5m")
+	}
+	if err != nil {
+		return fmt.Errorf("go build ./... failed: %w\n%s", err, out)
+	}
+	return nil
 }
 
 // forceRegenSpecHashMatches reports whether the snapshot's recorded spec

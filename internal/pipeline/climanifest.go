@@ -28,6 +28,14 @@ import (
 // published CLI directory.
 const CLIManifestFilename = ".printing-press.json"
 
+// CLIReleaseManifestFilename is the public-library release ledger manifest.
+// The generator writes a skeleton only; printing-press-library assigns the
+// actual per-CLI release version after the publish PR merges.
+const CLIReleaseManifestFilename = ".printing-press-release.json"
+
+// CLIChangelogFilename is the public-library per-CLI changelog.
+const CLIChangelogFilename = "CHANGELOG.md"
+
 // CurrentCLIManifestSchemaVersion is the public-library provenance contract.
 const CurrentCLIManifestSchemaVersion = 1
 
@@ -106,6 +114,7 @@ type CLIManifest struct {
 	SpecURL            string            `json:"spec_url,omitempty"`
 	SpecPath           string            `json:"spec_path,omitempty"`
 	SpecFormat         string            `json:"spec_format,omitempty"`
+	SpecKind           string            `json:"spec_kind,omitempty"`
 	SpecSource         string            `json:"spec_source,omitempty"`
 	SpecChecksum       string            `json:"spec_checksum,omitempty"`
 	RunID              string            `json:"run_id,omitempty"`
@@ -120,6 +129,7 @@ type CLIManifest struct {
 	MCPReady           string            `json:"mcp_ready,omitempty"`
 	APIVersion         string            `json:"api_version,omitempty"` // from the spec's info.version — provenance only, not the CLI version
 	AuthType           string            `json:"auth_type,omitempty"`
+	AuthPreference     string            `json:"auth_preference,omitempty"`
 	AuthEnvVars        []string          `json:"auth_env_vars,omitempty"`
 	AuthEnvVarSpecs    []spec.AuthEnvVar `json:"auth_env_var_specs,omitempty"`
 	// AuthAdditionalHeaders mirrors AuthConfig.AdditionalHeaders so the MCPB
@@ -153,6 +163,21 @@ type CLIManifest struct {
 	NovelFeatures []NovelFeatureManifest `json:"novel_features,omitempty"`
 }
 
+// CLIReleaseManifest is the skeleton shape consumed by the public library's
+// release-ledger workflow. Version fields are intentionally blank at print
+// time: the library owns final release accounting to avoid PR-time conflicts.
+type CLIReleaseManifest struct {
+	SchemaVersion        int      `json:"schema_version"`
+	Slug                 string   `json:"slug"`
+	CLIName              string   `json:"cli_name,omitempty"`
+	Version              string   `json:"version"`
+	ReleasedAt           string   `json:"released_at"`
+	SourceCommit         string   `json:"source_commit"`
+	PrintingPressVersion string   `json:"printing_press_version,omitempty"`
+	RunID                string   `json:"run_id,omitempty"`
+	Changes              []string `json:"changes,omitempty"`
+}
+
 // IsLocalDatastore reports whether the manifest describes a local-datastore
 // CLI rather than an HTTP API wrapper. These CLIs read operator-local stores
 // such as SQLite databases and should not be scored or dogfooded through
@@ -165,6 +190,12 @@ func (m CLIManifest) IsLocalDatastore() bool {
 		return true
 	}
 	return strings.Contains(source, "local") && strings.Contains(source, "sqlite")
+}
+
+// IsSyntheticSpec reports whether the manifest came from a spec marked
+// `kind: synthetic`, which relaxes gates that assume HTTP API reachability.
+func (m CLIManifest) IsSyntheticSpec() bool {
+	return strings.EqualFold(strings.TrimSpace(m.SpecKind), spec.KindSynthetic)
 }
 
 // NovelFeatureManifest is a compact representation of a transcendence feature
@@ -242,7 +273,9 @@ func RefreshCLIManifestFromSpec(dir string, parsed *spec.APISpec) error {
 }
 
 // WriteCLIManifest marshals m as indented JSON and writes it to
-// dir/.printing-press.json.
+// dir/.printing-press.json. It also ensures the release-ledger skeleton files
+// exist so fresh published CLIs have the same shape the public library assigns
+// to older entries after merge.
 func WriteCLIManifest(dir string, m CLIManifest) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -250,6 +283,49 @@ func WriteCLIManifest(dir string, m CLIManifest) error {
 	}
 	if err := os.WriteFile(filepath.Join(dir, CLIManifestFilename), data, 0o644); err != nil {
 		return fmt.Errorf("writing CLI manifest: %w", err)
+	}
+	if err := WriteReleaseLedgerSkeleton(dir, m); err != nil {
+		return err
+	}
+	return nil
+}
+
+// WriteReleaseLedgerSkeleton writes the public-library release skeleton files
+// without assigning a release version. Existing files are preserved because the
+// library workflow owns updating them after merge.
+func WriteReleaseLedgerSkeleton(dir string, m CLIManifest) error {
+	releasePath := filepath.Join(dir, CLIReleaseManifestFilename)
+	if _, err := os.Stat(releasePath); errors.Is(err, os.ErrNotExist) {
+		release := CLIReleaseManifest{
+			SchemaVersion:        1,
+			Slug:                 m.APIName,
+			CLIName:              m.CLIName,
+			Version:              "",
+			ReleasedAt:           "",
+			SourceCommit:         "",
+			PrintingPressVersion: m.PrintingPressVersion,
+			RunID:                m.RunID,
+		}
+		data, err := json.MarshalIndent(release, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshaling CLI release manifest skeleton: %w", err)
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(releasePath, data, 0o644); err != nil {
+			return fmt.Errorf("writing CLI release manifest skeleton: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("checking CLI release manifest skeleton: %w", err)
+	}
+
+	changelogPath := filepath.Join(dir, CLIChangelogFilename)
+	if _, err := os.Stat(changelogPath); errors.Is(err, os.ErrNotExist) {
+		data := []byte("# Changelog\n\nThis file is maintained by printing-press-library release automation. Do not hand-edit release sections in normal PRs.\n\n")
+		if err := os.WriteFile(changelogPath, data, 0o644); err != nil {
+			return fmt.Errorf("writing CLI changelog skeleton: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("checking CLI changelog skeleton: %w", err)
 	}
 	return nil
 }
@@ -506,6 +582,7 @@ func orderedCLIManifestKeys(raw map[string]json.RawMessage) []string {
 		"mcp_ready",
 		"api_version",
 		"auth_type",
+		"auth_preference",
 		"auth_env_vars",
 		"auth_env_var_specs",
 		"endpoint_template_vars",
@@ -601,6 +678,7 @@ func populateMCPMetadata(m *CLIManifest, parsed *spec.APISpec) {
 	if parsed == nil {
 		return
 	}
+	m.SpecKind = parsed.Kind
 	total, public := parsed.CountMCPTools()
 	mcpName := m.APIName
 	if mcpName == "" {
@@ -611,6 +689,7 @@ func populateMCPMetadata(m *CLIManifest, parsed *spec.APISpec) {
 	m.MCPPublicToolCount = public
 	m.MCPReady = computeMCPReady(parsed.Auth.Type)
 	m.AuthType = parsed.Auth.Type
+	m.AuthPreference = strings.TrimSpace(parsed.Auth.Scheme)
 	envVarSpecs := manifestAuthEnvVarSpecs(parsed)
 	m.AuthEnvVars = manifestAuthEnvVarNames(parsed, envVarSpecs)
 	if !spec.AllAuthEnvVarSpecsInferred(envVarSpecs) {
@@ -724,37 +803,36 @@ func manifestAuthEnvVarSpecs(parsed *spec.APISpec) []spec.AuthEnvVar {
 // PipelineState), the standalone generate command only knows the spec
 // sources and output directory.
 type GenerateManifestParams struct {
-	APIName       string
-	SpecSrcs      []string // --spec args (URLs or file paths)
-	SpecURL       string   // --spec-url: explicit provenance URL (when --spec is a local downloaded file)
-	DocsURL       string   // --docs URL, if used
-	OutputDir     string
-	Description   string                 // best generated user-facing catalog description
-	DisplayName   string                 // best generated user-facing catalog display name
-	Creator       spec.Person            // resolved creator (manifest preserve > legacy fields > git config)
-	Contributors  []spec.Person          // resolved contributors, preserved from the existing manifest
-	Owner         string                 // legacy, derived from Creator.Handle (dual-write)
-	Printer       string                 // legacy, derived from Creator.Handle (dual-write)
-	PrinterName   string                 // legacy, derived from Creator.Name (dual-write)
-	RunID         string                 // YYYYMMDD-HHMMSS, derived from --research-dir basename when empty
-	Spec          *spec.APISpec          // parsed spec for MCP metadata (nil if unavailable)
-	NovelFeatures []NovelFeatureManifest // transcendence features from research (nil if unavailable)
+	APIName        string
+	SpecSrcs       []string // --spec args (URLs or file paths)
+	SpecURL        string   // --spec-url: explicit provenance URL (when --spec is a local downloaded file)
+	DocsURL        string   // --docs URL, if used
+	OutputDir      string
+	Description    string                 // best generated user-facing catalog description
+	DisplayName    string                 // best generated user-facing catalog display name
+	Creator        spec.Person            // resolved creator (manifest preserve > legacy fields > git config)
+	Contributors   []spec.Person          // resolved contributors, preserved from the existing manifest
+	Owner          string                 // legacy, derived from Creator.Handle (dual-write)
+	Printer        string                 // legacy, derived from Creator.Handle (dual-write)
+	PrinterName    string                 // legacy, derived from Creator.Name (dual-write)
+	RunID          string                 // from --research-dir/state.json when available, legacy basename fallback otherwise
+	Spec           *spec.APISpec          // parsed spec for MCP metadata (nil if unavailable)
+	AuthPreference string                 // resolved OpenAPI securityScheme preference selected for this generate
+	NovelFeatures  []NovelFeatureManifest // transcendence features from research (nil if unavailable)
 }
 
-// runIDPattern matches the canonical pipeline run_id shape: YYYYMMDD-HHMMSS.
-// When an arbitrary path basename happens to match this pattern, treat it as
-// a real run_id; otherwise fall back to empty (and warn at the call site).
-var runIDPattern = regexp.MustCompile(`^\d{8}-\d{6}$`)
+// runIDPattern matches legacy and skill-allocated pipeline run_id basenames.
+// State files are the source of truth for current runs; this is only a legacy
+// fallback for older run directories that predate state-backed generate.
+var runIDPattern = regexp.MustCompile(`^\d{8}-\d{6}(?:-[A-Za-z0-9._-]+)?$`)
 
-// runIDTimeFormat is the canonical YYYYMMDD-HHMMSS layout matched by
-// runIDPattern. Kept as a const so the format and pattern can't drift.
+// runIDTimeFormat is the legacy timestamp-only layout used when generate has
+// no state-backed run_id. Kept as a const so fallback formatting stays stable.
 const runIDTimeFormat = "20060102-150405"
 
 // DeriveRunIDFromResearchDir extracts a canonical run_id from a research-dir
-// path, or returns "" when no valid run_id can be derived. The standalone
-// generate command does not load a PipelineState, so it cannot reach
-// state.RunID directly; the basename of --research-dir is the only structured
-// signal available without a state-loading refactor.
+// path, or returns "" when no valid run_id can be derived. Prefer
+// ResolveRunIDFromResearchDir for current generate flows so state.json wins.
 func DeriveRunIDFromResearchDir(researchDir string) string {
 	if researchDir == "" {
 		return ""
@@ -766,6 +844,39 @@ func DeriveRunIDFromResearchDir(researchDir string) string {
 	return ""
 }
 
+type generateResearchState struct {
+	APIName string `json:"api_name"`
+	RunID   string `json:"run_id"`
+}
+
+func loadGenerateResearchState(researchDir string) (generateResearchState, bool) {
+	if researchDir == "" {
+		return generateResearchState{}, false
+	}
+	statePath := filepath.Join(researchDir, "state.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return generateResearchState{}, false
+	}
+	var state generateResearchState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return generateResearchState{}, false
+	}
+	state.APIName = strings.TrimSpace(state.APIName)
+	state.RunID = strings.TrimSpace(state.RunID)
+	return state, state.APIName != "" || state.RunID != ""
+}
+
+// ResolveRunIDFromResearchDir reads the run_id recorded by Run Initialization
+// in `<researchDir>/state.json`, falling back to the path basename only for
+// legacy runs that predate state-backed generate.
+func ResolveRunIDFromResearchDir(researchDir string) string {
+	if state, ok := loadGenerateResearchState(researchDir); ok && state.RunID != "" {
+		return state.RunID
+	}
+	return DeriveRunIDFromResearchDir(researchDir)
+}
+
 // LoadAPINameFromResearchDir reads `<researchDir>/state.json` and returns the
 // recorded api_name slug, or "" when the file is absent, unreadable, malformed,
 // or has no api_name. The generate command uses this as an implicit --name
@@ -775,21 +886,11 @@ func DeriveRunIDFromResearchDir(researchDir string) string {
 // --name wins over this; an absent or unreadable state.json silently yields
 // to the title-derived default.
 func LoadAPINameFromResearchDir(researchDir string) string {
-	if researchDir == "" {
+	state, ok := loadGenerateResearchState(researchDir)
+	if !ok {
 		return ""
 	}
-	statePath := filepath.Join(researchDir, "state.json")
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		return ""
-	}
-	var probe struct {
-		APIName string `json:"api_name"`
-	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(probe.APIName)
+	return state.APIName
 }
 
 // WriteManifestForGenerate writes a .printing-press.json manifest into the
@@ -798,8 +899,9 @@ func LoadAPINameFromResearchDir(researchDir string) string {
 //
 // An empty p.RunID is auto-filled with a fresh timestamp so the emitted
 // manifest satisfies publish-validate's required-run_id contract. Phase 5
-// dogfood acceptance still needs the original research-dir-derived run_id,
-// and the root.go --research-dir warning informs phase5 callers of that gap.
+// dogfood acceptance still needs the original run_id from state.json or the
+// legacy research-dir basename, and the root.go --research-dir warning
+// informs phase5 callers of that gap.
 func WriteManifestForGenerate(p GenerateManifestParams) error {
 	now := time.Now().UTC()
 	runID := p.RunID
@@ -896,10 +998,16 @@ func WriteManifestForGenerate(p GenerateManifestParams) error {
 	if p.Spec != nil && p.Spec.Version != "" {
 		m.APIVersion = p.Spec.Version
 	}
+	if p.Spec != nil && p.Spec.IsLocalSQLiteSource() {
+		m.SpecFormat = spec.SourceLocalSQLite
+	}
 
 	// Populate MCP metadata from the parsed spec.
 	if p.Spec != nil {
 		populateMCPMetadata(&m, p.Spec)
+	}
+	if authPreference := strings.TrimSpace(p.AuthPreference); authPreference != "" {
+		m.AuthPreference = authPreference
 	}
 	if displayName := strings.TrimSpace(p.DisplayName); displayName != "" {
 		m.DisplayName = displayName
@@ -960,6 +1068,9 @@ func WriteManifestForGenerate(p GenerateManifestParams) error {
 	// would otherwise leave the persisted list in place).
 	if preserveExisting && p.Contributors != nil && len(p.Contributors) == 0 {
 		clearFields["contributors"] = struct{}{}
+	}
+	if preserveExisting && strings.TrimSpace(m.AuthPreference) == "" {
+		clearFields["auth_preference"] = struct{}{}
 	}
 	if preserveExisting {
 		if m.SpecURL != "" && m.SpecPath == "" {

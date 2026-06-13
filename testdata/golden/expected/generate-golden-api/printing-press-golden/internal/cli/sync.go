@@ -430,6 +430,12 @@ func syncResource(ctx context.Context, c interface {
 
 	// Resume cursor from sync_state (unless --full cleared it)
 	existingCursor, lastSynced, _, _ := db.GetSyncState(resource)
+	if !full {
+		if storedCount, err := db.Count(resource); err == nil && storedCount == 0 {
+			existingCursor = ""
+			lastSynced = time.Time{}
+		}
+	}
 
 	// Determine the since param value:
 	// 1. Explicit --since flag takes priority
@@ -452,10 +458,12 @@ func syncResource(ctx context.Context, c interface {
 		}
 		effectiveSince = ""
 	}
+	if effectiveSince != "" {
+		effectiveSince = formatSyncSinceValue(effectiveSince, syncResourceSinceParamFormat(resource))
+	}
 
 	cursor := existingCursor
 	pageSize := determinePaginationDefaults()
-
 	var progressCount int64
 	pagesFetched := 0
 	lastNextCursor := ""
@@ -487,7 +495,6 @@ func syncResource(ctx context.Context, c interface {
 		if effectiveSince != "" {
 			params[sinceParam] = effectiveSince
 		}
-
 		// Apply user-supplied --param / --resource-param overrides last so they
 		// win over spec-derived defaults (e.g. forcing mine=true on a list
 		// endpoint whose OpenAPI spec marks the filter optional).
@@ -536,6 +543,11 @@ func syncResource(ctx context.Context, c interface {
 				currentPage = 1
 			}
 			nextCursor = strconv.Itoa(currentPage + 1)
+			hasMore = true
+		}
+		if pageSize.cursorType == "offset" && nextCursor == "" && len(items) >= pageSize.limit && pageAllowsPageIntFallback(data) {
+			currentOffset, _ := strconv.Atoi(cursor)
+			nextCursor = strconv.Itoa(currentOffset + pageSize.limit)
 			hasMore = true
 		}
 
@@ -612,6 +624,9 @@ func syncResource(ctx context.Context, c interface {
 
 		totalCount += stored
 		atomic.AddInt64(&progressCount, int64(stored))
+		if resourceSupportsPagination(resource) && nextCursor == "" && pageSize.cursorParam != "offset" && len(items) >= pageSize.limit && pageMayHaveMore(data) {
+			emitSyncMissingPaginationCursorWarning(syncEvents, humanFriendly, resource, "")
+		}
 
 		// Progress reporting (include rate limit info when active)
 		currentRate := c.RateLimit()
@@ -643,7 +658,7 @@ func syncResource(ctx context.Context, c interface {
 				capExitCursor = nextCursor
 			}
 			if truncatedByCap && capExitCursor == "" {
-				if pageSize.cursorParam == "offset" {
+				if pageSize.cursorType == "offset" {
 					currentOffset, _ := strconv.Atoi(cursor)
 					capExitCursor = strconv.Itoa(currentOffset + pageSize.limit)
 				} else {
@@ -687,7 +702,7 @@ func syncResource(ctx context.Context, c interface {
 			break
 		}
 		if nextCursor == "" {
-			if pageSize.cursorParam == "offset" {
+			if pageSize.cursorType == "offset" {
 				// Cursor-based APIs return the next cursor in the envelope.
 				// Offset-based APIs carry their pagination position client-side.
 				currentOffset, _ := strconv.Atoi(cursor)
@@ -775,6 +790,27 @@ func syncResourceSinceParam(resource string) string {
 	switch resource {
 	}
 	return ""
+}
+
+func syncResourceSinceParamFormat(resource string) string {
+	switch resource {
+	}
+	return ""
+}
+
+func formatSyncSinceValue(value string, paramFormat string) string {
+	if strings.EqualFold(paramFormat, "date") {
+		if ts, err := time.Parse(time.RFC3339, value); err == nil {
+			return ts.Format("2006-01-02")
+		}
+		if ts, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return ts.Format("2006-01-02")
+		}
+		if _, err := time.Parse("2006-01-02", value); err == nil {
+			return value
+		}
+	}
+	return value
 }
 
 // extractPageItems attempts to extract an array of items and pagination cursor from a response.
@@ -1073,8 +1109,8 @@ func extractPaginationFromEnvelope(envelope map[string]json.RawMessage, cursorPa
 
 	// Try common cursor field names
 	cursorKeys := []string{
-		"next_cursor", "nextCursor", "cursor", "next_page_token",
-		"nextPageToken", "page_token", "after", "end_cursor", "endCursor",
+		"next_cursor", "nextCursor", "next_token", "nextToken", "cursor",
+		"next_page_token", "nextPageToken", "page_token", "after", "end_cursor", "endCursor",
 	}
 	if nextCursor == "" {
 		nextCursor = findCursorInMap(envelope, cursorKeys)
@@ -1082,12 +1118,13 @@ func extractPaginationFromEnvelope(envelope map[string]json.RawMessage, cursorPa
 
 	// If no top-level cursor was found, look one level deeper into well-known
 	// pagination wrapper objects. Slack returns {"messages":[...],
-	// "response_metadata":{"next_cursor":"..."}}; MongoDB Atlas uses
-	// "pagination"; many APIs use "meta" or "paging". Purely additive — only
+	// "response_metadata":{"next_cursor":"..."}}; Pipedrive uses
+	// "additional_data"; MongoDB Atlas uses "pagination"; many APIs use
+	// "meta" or "paging". Purely additive — only
 	// runs when the top-level scan returned empty — and uses the same
 	// cursorKeys set so wrapper contents go through the same name match.
 	if nextCursor == "" {
-		paginationWrapperKeys := []string{"response_metadata", "pagination", "meta", "paging"}
+		paginationWrapperKeys := []string{"response_metadata", "additional_data", "pagination", "meta", "paging"}
 		for _, wrapperKey := range paginationWrapperKeys {
 			rawWrapper, ok := envelope[wrapperKey]
 			if !ok {
@@ -1127,6 +1164,10 @@ func extractPaginationFromEnvelope(envelope map[string]json.RawMessage, cursorPa
 }
 
 func pageAllowsPageIntFallback(data json.RawMessage) bool {
+	return pageMayHaveMore(data)
+}
+
+func pageMayHaveMore(data json.RawMessage) bool {
 	hasMore, parsed := pageExplicitHasMore(data)
 	return !parsed || hasMore
 }
@@ -1264,6 +1305,22 @@ func findCursorInMap(m map[string]json.RawMessage, cursorKeys []string) string {
 		}
 	}
 	return ""
+}
+
+func emitSyncMissingPaginationCursorWarning(syncEvents io.Writer, humanFriendly bool, resource, parent string) {
+	if humanFriendly {
+		if parent != "" {
+			fmt.Fprintf(os.Stderr, "\nwarning: %s returned a full page for parent %s without a next cursor; data may be truncated.\n", resource, parent)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "\nwarning: %s returned a full page without a next cursor; data may be truncated.\n", resource)
+		return
+	}
+	if parent != "" {
+		fmt.Fprintf(syncEvents, `{"event":"sync_warning","resource":"%s","parent":"%s","reason":"pagination_cursor_missing","message":"API returned a full page without a usable next cursor; data may be truncated."}`+"\n", resource, parent)
+		return
+	}
+	fmt.Fprintf(syncEvents, `{"event":"sync_warning","resource":"%s","reason":"pagination_cursor_missing","message":"API returned a full page without a usable next cursor; data may be truncated."}`+"\n", resource)
 }
 
 type discriminatorDispatch struct {
@@ -1510,6 +1567,9 @@ func syncDependentResource(ctx context.Context, c interface {
 		}
 		depSinceTS = ""
 	}
+	if depSinceTS != "" {
+		depSinceTS = formatSyncSinceValue(depSinceTS, syncResourceSinceParamFormat(dep.Name))
+	}
 	// Per-resource extract-failure tracking for the F4b symptom probe and
 	// per-item primary_key_unresolved warning. See syncResource for the
 	// concurrency rationale (one goroutine per resource → no race).
@@ -1548,7 +1608,6 @@ func syncDependentResource(ctx context.Context, c interface {
 			if depSinceTS != "" {
 				params[depSinceParam] = depSinceTS
 			}
-
 			// Apply user flags last so they win over spec-derived cursor/since/limit.
 			// Dependent path: --param is skipped (already scoped by the parent path
 			// segment); --global-param and --resource-param still apply.
@@ -1591,6 +1650,11 @@ func syncDependentResource(ctx context.Context, c interface {
 					currentPage = 1
 				}
 				nextCursor = strconv.Itoa(currentPage + 1)
+				hasMore = true
+			}
+			if pageSize.cursorType == "offset" && nextCursor == "" && len(items) >= pageSize.limit && pageAllowsPageIntFallback(data) {
+				currentOffset, _ := strconv.Atoi(cursor)
+				nextCursor = strconv.Itoa(currentOffset + pageSize.limit)
 				hasMore = true
 			}
 
@@ -1661,6 +1725,9 @@ func syncDependentResource(ctx context.Context, c interface {
 			}
 
 			totalCount += stored
+			if resourceSupportsPagination(dep.Name) && nextCursor == "" && pageSize.cursorParam != "offset" && len(items) >= pageSize.limit && pageMayHaveMore(data) {
+				emitSyncMissingPaginationCursorWarning(syncEvents, humanFriendly, dep.Name, parentID)
+			}
 			pagesFetched++
 
 			if maxPages > 0 && pagesFetched >= maxPages {
@@ -1692,7 +1759,7 @@ func syncDependentResource(ctx context.Context, c interface {
 				break
 			}
 			if nextCursor == "" {
-				if pageSize.cursorParam == "offset" {
+				if pageSize.cursorType == "offset" {
 					// Cursor-based APIs return the next cursor in the envelope.
 					// Offset-based APIs carry their pagination position client-side.
 					currentOffset, _ := strconv.Atoi(cursor)
@@ -1823,6 +1890,7 @@ var pageEnvelopeMetadataKeys = map[string]bool{
 	"Data": true, "Results": true, "Items": true,
 	// pagination cursors / tokens
 	"next_cursor": true, "nextCursor": true, "NextCursor": true,
+	"next_token": true, "nextToken": true, "NextToken": true,
 	"next_page_token": true, "nextPageToken": true, "NextPageToken": true,
 	"page_token": true, "pageToken": true, "PageToken": true,
 	"end_cursor": true, "endCursor": true, "EndCursor": true,

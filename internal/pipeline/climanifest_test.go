@@ -62,6 +62,47 @@ func TestWriteCLIManifest(t *testing.T) {
 	assert.Equal(t, "nl", got.APILanguage)
 	assert.Equal(t, "Notion workspace API", got.Description)
 	assert.Equal(t, m.GeneratedAt, got.GeneratedAt)
+
+	releaseData, err := os.ReadFile(filepath.Join(dir, CLIReleaseManifestFilename))
+	require.NoError(t, err)
+	var release CLIReleaseManifest
+	require.NoError(t, json.Unmarshal(releaseData, &release))
+	assert.Equal(t, 1, release.SchemaVersion)
+	assert.Equal(t, "notion", release.Slug)
+	assert.Equal(t, "notion-pp-cli", release.CLIName)
+	assert.Equal(t, "", release.Version)
+	assert.Equal(t, "", release.ReleasedAt)
+	assert.Equal(t, "", release.SourceCommit)
+	assert.Equal(t, "0.4.0", release.PrintingPressVersion)
+	assert.Equal(t, "20260328T150405Z-abcd1234", release.RunID)
+	assert.NotContains(t, string(releaseData), `"changes"`)
+
+	changelog, err := os.ReadFile(filepath.Join(dir, CLIChangelogFilename))
+	require.NoError(t, err)
+	assert.Contains(t, string(changelog), "printing-press-library release automation")
+}
+
+func TestWriteCLIManifestPreservesExistingReleaseLedger(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIReleaseManifestFilename), []byte(`{"schema_version":1,"version":"2026.6.2"}`+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIChangelogFilename), []byte("# Changelog\n\n## 2026.6.2 - 2026-06-08\n\n- Existing history.\n"), 0o644))
+
+	err := WriteCLIManifest(dir, CLIManifest{
+		SchemaVersion:        1,
+		PrintingPressVersion: "4.23.1",
+		APIName:              "notion",
+		CLIName:              "notion-pp-cli",
+		RunID:                "20260608-000000",
+	})
+	require.NoError(t, err)
+
+	releaseData, err := os.ReadFile(filepath.Join(dir, CLIReleaseManifestFilename))
+	require.NoError(t, err)
+	assert.Contains(t, string(releaseData), `"version":"2026.6.2"`)
+
+	changelog, err := os.ReadFile(filepath.Join(dir, CLIChangelogFilename))
+	require.NoError(t, err)
+	assert.Contains(t, string(changelog), "Existing history")
 }
 
 func TestWriteCLIManifestSchemaVersionAlwaysOne(t *testing.T) {
@@ -245,6 +286,10 @@ func TestWriteManifestForGenerateEmitsPatchesIndex(t *testing.T) {
 	// siblings cover MCPB-emit cases.)
 	_, err = os.Stat(filepath.Join(dir, CLIManifestFilename))
 	assert.NoError(t, err, "expected %s to exist after WriteManifestForGenerate", CLIManifestFilename)
+	_, err = os.Stat(filepath.Join(dir, CLIReleaseManifestFilename))
+	assert.NoError(t, err, "expected %s to exist after WriteManifestForGenerate", CLIReleaseManifestFilename)
+	_, err = os.Stat(filepath.Join(dir, CLIChangelogFilename))
+	assert.NoError(t, err, "expected %s to exist after WriteManifestForGenerate", CLIChangelogFilename)
 	_, err = os.Stat(filepath.Join(dir, PatchesDirName, PatchesGitKeepName))
 	assert.NoError(t, err, "expected %s/%s to exist after WriteManifestForGenerate", PatchesDirName, PatchesGitKeepName)
 	_, err = os.Stat(filepath.Join(dir, PatchesIndexFilename))
@@ -609,6 +654,7 @@ resources:
 	assert.Equal(t, 1, got.MCPPublicToolCount)
 	assert.Equal(t, "full", got.MCPReady)
 	assert.Equal(t, "bearer_token", got.AuthType)
+	assert.Empty(t, got.SpecKind)
 	assert.Equal(t, []string{"INTERNAL_SPEC_TOKEN"}, got.AuthEnvVars)
 }
 
@@ -643,6 +689,60 @@ func TestWriteManifestForGenerateWithSpecURL(t *testing.T) {
 	assert.False(t, got.GeneratedAt.IsZero())
 }
 
+func TestWriteManifestForGenerateRecordsAuthPreference(t *testing.T) {
+	dir := t.TempDir()
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:        "multi-auth",
+		OutputDir:      dir,
+		AuthPreference: "ApiKeyAuth",
+		Spec: &spec.APISpec{
+			Name: "multi-auth",
+			Auth: spec.AuthConfig{
+				Type:   "api_key",
+				Scheme: "ApiKeyAuth",
+				In:     "header",
+				Header: "x-api-key",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	got := readPublishedManifest(t, dir)
+	assert.Equal(t, "api_key", got.AuthType)
+	assert.Equal(t, "ApiKeyAuth", got.AuthPreference)
+}
+
+func TestWriteManifestForGenerateClearsStaleAuthPreference(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, CLIManifest{
+		APIName:        "multi-auth",
+		CLIName:        "multi-auth-pp-cli",
+		AuthType:       "api_key",
+		AuthPreference: "ApiKeyAuth",
+	})
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "multi-auth",
+		OutputDir: dir,
+		Spec: &spec.APISpec{
+			Name: "multi-auth",
+			Auth: spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.NotContains(t, raw, "auth_preference")
+
+	got := readPublishedManifest(t, dir)
+	assert.Equal(t, "none", got.AuthType)
+	assert.Empty(t, got.AuthPreference)
+}
+
 func TestWriteManifestForGenerateWithLocalSpec(t *testing.T) {
 	dir := t.TempDir()
 
@@ -661,6 +761,62 @@ func TestWriteManifestForGenerateWithLocalSpec(t *testing.T) {
 
 	assert.Empty(t, got.SpecURL, "local path should not appear in spec_url")
 	assert.Equal(t, "my-spec.yaml", got.SpecPath)
+}
+
+func TestWriteManifestForGenerateStampsLocalSQLiteSpecFormat(t *testing.T) {
+	dir := t.TempDir()
+	localSpec := &spec.APISpec{
+		Name:   "local-data",
+		Source: spec.SourceLocalSQLite,
+		Auth:   spec.AuthConfig{Type: "none"},
+		Resources: map[string]spec.Resource{
+			"items": {Endpoints: map[string]spec.Endpoint{"list": {Method: "GET", Path: "/items"}}},
+		},
+	}
+
+	for range 2 {
+		require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+			APIName:   "local-data",
+			SpecSrcs:  []string{"/tmp/local-data.yaml"},
+			OutputDir: dir,
+			Spec:      localSpec,
+		}))
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, spec.SourceLocalSQLite, got.SpecFormat)
+	assert.True(t, got.IsLocalDatastore())
+	assert.Equal(t, "local-data.yaml", got.SpecPath)
+}
+
+func TestWriteManifestForGenerateStampsSyntheticSpecKind(t *testing.T) {
+	dir := t.TempDir()
+	syntheticSpec := &spec.APISpec{
+		Name: "aws-billing",
+		Kind: spec.KindSynthetic,
+		Auth: spec.AuthConfig{Type: "none"},
+		Resources: map[string]spec.Resource{
+			"costs": {Endpoints: map[string]spec.Endpoint{"list": {Method: "GET", Path: "/costs"}}},
+		},
+	}
+
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "aws-billing",
+		OutputDir: dir,
+		Spec:      syntheticSpec,
+	}))
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, spec.KindSynthetic, got.SpecKind)
+	assert.True(t, got.IsSyntheticSpec())
 }
 
 func TestWriteManifestForGenerateMCPBManifestUsesResolvedMCPBinarySlug(t *testing.T) {
@@ -832,12 +988,13 @@ func TestDeriveRunIDFromResearchDir(t *testing.T) {
 		expected string
 	}{
 		{"canonical run_id basename", "/tmp/runs/20260504-190931", "20260504-190931"},
+		{"skill-allocated suffixed basename", "/tmp/runs/20260504-190931-a1b2c3d4", "20260504-190931-a1b2c3d4"},
 		{"trailing slash", "/tmp/runs/20260504-190931/", "20260504-190931"},
 		{"basename only", "20260101-000000", "20260101-000000"},
 		{"empty input", "", ""},
 		{"non-matching basename", "/tmp/runs/research", ""},
 		{"partial match (date only)", "/tmp/runs/20260504", ""},
-		{"longer suffix", "/tmp/runs/20260504-190931-x", ""},
+		{"legacy basename with suffix", "/tmp/runs/20260504-190931-x", "20260504-190931-x"},
 		{"wrong shape (T separator)", "/tmp/runs/20260504T190931", ""},
 	}
 	for _, tc := range cases {
@@ -845,6 +1002,32 @@ func TestDeriveRunIDFromResearchDir(t *testing.T) {
 			assert.Equal(t, tc.expected, DeriveRunIDFromResearchDir(tc.input))
 		})
 	}
+}
+
+func TestResolveRunIDFromResearchDir(t *testing.T) {
+	t.Parallel()
+
+	t.Run("state json wins over basename", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "20260504-190931")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(dir, "state.json"),
+			[]byte(`{"api_name":"canvas","run_id":"20260606-102750-a1b2c3d4"}`),
+			0o644,
+		))
+		assert.Equal(t, "20260606-102750-a1b2c3d4", ResolveRunIDFromResearchDir(dir))
+	})
+
+	t.Run("falls back to legacy basename", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "20260504-190931", ResolveRunIDFromResearchDir("/tmp/runs/20260504-190931"))
+	})
+
+	t.Run("empty string when state and basename are not usable", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "", ResolveRunIDFromResearchDir(t.TempDir()))
+	})
 }
 
 func TestLoadAPINameFromResearchDir(t *testing.T) {
@@ -1038,6 +1221,21 @@ func TestWriteMCPBManifest(t *testing.T) {
 		require.NoError(t, WriteMCPBManifest(dir))
 		_, statErr := os.Stat(filepath.Join(dir, MCPBManifestFilename))
 		assert.True(t, os.IsNotExist(statErr))
+	})
+
+	t.Run("uses generate-time placeholder instead of printing press version", func(t *testing.T) {
+		dir := t.TempDir()
+		writeManifest(t, dir, CLIManifest{
+			APIName:              "demo",
+			MCPBinary:            "demo-pp-mcp",
+			MCPReady:             "full",
+			PrintingPressVersion: "4.11.0",
+		})
+
+		require.NoError(t, WriteMCPBManifest(dir))
+		got := readMCPBManifest(t, dir)
+
+		assert.Equal(t, "0.0.0", got.Version)
 	})
 
 	t.Run("api_key auth emits required user_config fields", func(t *testing.T) {

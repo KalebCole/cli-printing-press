@@ -30,19 +30,21 @@ type Config struct {
 	// back to it. Used by save() to scrub credential fields from the
 	// old location after relocation. Unexported: never persisted.
 	legacySourcePath      string
-	AccessToken           string    `toml:"access_token"`
-	RefreshToken          string    `toml:"refresh_token"`
-	TokenExpiry           time.Time `toml:"token_expiry"`
-	ClientID              string    `toml:"client_id"`
-	ClientSecret          string    `toml:"client_secret"`
-	Path                  string    `toml:"-"`
-	RichAuthApiKey        string    `toml:"auth_api_key"`
-	RichAuthClientId      string    `toml:"auth_client_id"`
-	RichAuthClientSecret  string    `toml:"auth_client_secret"`
-	RichAuthSessionCookie string    `toml:"auth_session_cookie"`
-	RichAuthOptionalToken string    `toml:"auth_optional_token"`
-	RichAuthBotToken      string    `toml:"auth_bot_token"`
-	RichAuthUserToken     string    `toml:"auth_user_token"`
+	AccessToken           string          `toml:"access_token"`
+	RefreshToken          string          `toml:"refresh_token"`
+	TokenExpiry           time.Time       `toml:"token_expiry"`
+	ClientID              string          `toml:"client_id"`
+	ClientSecret          string          `toml:"client_secret"`
+	Path                  string          `toml:"-"`
+	envOverrides          map[string]bool `toml:"-"`
+	fileConfig            *Config         `toml:"-"`
+	RichAuthApiKey        string          `toml:"auth_api_key"`
+	RichAuthClientId      string          `toml:"auth_client_id"`
+	RichAuthClientSecret  string          `toml:"auth_client_secret"`
+	RichAuthSessionCookie string          `toml:"auth_session_cookie"`
+	RichAuthOptionalToken string          `toml:"auth_optional_token"`
+	RichAuthBotToken      string          `toml:"auth_bot_token"`
+	RichAuthUserToken     string          `toml:"auth_user_token"`
 }
 
 func Load(configPath string) (*Config, error) {
@@ -109,39 +111,48 @@ func Load(configPath string) (*Config, error) {
 		}
 	}
 
+	cfg.snapshotFileConfig()
+
 	// Env var overrides
 	if v := os.Getenv("RICH_AUTH_API_KEY"); v != "" {
 		cfg.RichAuthApiKey = v
+		cfg.markEnvOverride("RichAuthApiKey")
 		cfg.AuthSource = "env:RICH_AUTH_API_KEY"
 		cfg.CredentialSource = "env:RICH_AUTH_API_KEY"
 	}
 	if v := os.Getenv("RICH_AUTH_CLIENT_ID"); v != "" {
 		cfg.RichAuthClientId = v
+		cfg.markEnvOverride("RichAuthClientId")
 		cfg.AuthSource = "env:RICH_AUTH_CLIENT_ID"
 		cfg.CredentialSource = "env:RICH_AUTH_CLIENT_ID"
 	}
 	if v := os.Getenv("RICH_AUTH_CLIENT_SECRET"); v != "" {
 		cfg.RichAuthClientSecret = v
+		cfg.markEnvOverride("RichAuthClientSecret")
 		cfg.AuthSource = "env:RICH_AUTH_CLIENT_SECRET"
 		cfg.CredentialSource = "env:RICH_AUTH_CLIENT_SECRET"
 	}
 	if v := os.Getenv("RICH_AUTH_SESSION_COOKIE"); v != "" {
 		cfg.RichAuthSessionCookie = v
+		cfg.markEnvOverride("RichAuthSessionCookie")
 		cfg.AuthSource = "env:RICH_AUTH_SESSION_COOKIE"
 		cfg.CredentialSource = "env:RICH_AUTH_SESSION_COOKIE"
 	}
 	if v := os.Getenv("RICH_AUTH_OPTIONAL_TOKEN"); v != "" {
 		cfg.RichAuthOptionalToken = v
+		cfg.markEnvOverride("RichAuthOptionalToken")
 		cfg.AuthSource = "env:RICH_AUTH_OPTIONAL_TOKEN"
 		cfg.CredentialSource = "env:RICH_AUTH_OPTIONAL_TOKEN"
 	}
 	if v := os.Getenv("RICH_AUTH_BOT_TOKEN"); v != "" {
 		cfg.RichAuthBotToken = v
+		cfg.markEnvOverride("RichAuthBotToken")
 		cfg.AuthSource = "env:RICH_AUTH_BOT_TOKEN"
 		cfg.CredentialSource = "env:RICH_AUTH_BOT_TOKEN"
 	}
 	if v := os.Getenv("RICH_AUTH_USER_TOKEN"); v != "" {
 		cfg.RichAuthUserToken = v
+		cfg.markEnvOverride("RichAuthUserToken")
 		cfg.AuthSource = "env:RICH_AUTH_USER_TOKEN"
 		cfg.CredentialSource = "env:RICH_AUTH_USER_TOKEN"
 	}
@@ -371,7 +382,8 @@ func (c *Config) saveCredentialsFirst() error {
 		c.markAgentcookieManaged()
 		return nil
 	}
-	if err := cliutil.SaveCredentials(c.credentials()); err != nil {
+	persisted := c.configForSave()
+	if err := cliutil.SaveCredentials(persisted.credentials()); err != nil {
 		return err
 	}
 	c.CredentialSource = "credentials file"
@@ -384,6 +396,16 @@ func (c *Config) SaveTokens(clientID, clientSecret, accessToken, refreshToken st
 	c.AccessToken = accessToken
 	c.RefreshToken = refreshToken
 	c.TokenExpiry = expiry
+	delete(c.envOverrides, "ClientID")
+	delete(c.envOverrides, "ClientSecret")
+	delete(c.envOverrides, "AccessToken")
+	delete(c.envOverrides, "RefreshToken")
+	delete(c.envOverrides, "TokenExpiry")
+	c.updateFileConfigField("ClientID")
+	c.updateFileConfigField("ClientSecret")
+	c.updateFileConfigField("AccessToken")
+	c.updateFileConfigField("RefreshToken")
+	c.updateFileConfigField("TokenExpiry")
 	if err := c.saveCredentialsFirst(); err != nil {
 		return err
 	}
@@ -401,7 +423,17 @@ func (c *Config) SaveTokens(clientID, clientSecret, accessToken, refreshToken st
 func (c *Config) SaveCredential(token string) error {
 	c.AuthHeaderVal = ""
 	c.AccessToken = ""
+	// Pair each builtin-field zeroing with an envOverrides delete, like
+	// ClearTokens/SaveBearerToken: if an env var's placeholder collides with the
+	// AuthHeaderVal/AccessToken builtin tag, the override would otherwise survive
+	// and configForSave would restore the stale on-disk value instead of "".
+	delete(c.envOverrides, "AuthHeaderVal")
+	delete(c.envOverrides, "AccessToken")
+	c.updateFileConfigField("AuthHeaderVal")
+	c.updateFileConfigField("AccessToken")
 	c.RichAuthApiKey = token
+	delete(c.envOverrides, "RichAuthApiKey")
+	c.updateFileConfigField("RichAuthApiKey")
 	if err := c.saveCredentialsFirst(); err != nil {
 		return err
 	}
@@ -421,13 +453,39 @@ func (c *Config) ClearTokens() error {
 	c.TokenExpiry = time.Time{}
 	c.ClientID = ""
 	c.ClientSecret = ""
+	delete(c.envOverrides, "AuthHeaderVal")
+	delete(c.envOverrides, "AccessToken")
+	delete(c.envOverrides, "RefreshToken")
+	delete(c.envOverrides, "TokenExpiry")
+	delete(c.envOverrides, "ClientID")
+	delete(c.envOverrides, "ClientSecret")
+	c.updateFileConfigField("AuthHeaderVal")
+	c.updateFileConfigField("AccessToken")
+	c.updateFileConfigField("RefreshToken")
+	c.updateFileConfigField("TokenExpiry")
+	c.updateFileConfigField("ClientID")
+	c.updateFileConfigField("ClientSecret")
 	c.RichAuthApiKey = ""
+	delete(c.envOverrides, "RichAuthApiKey")
+	c.updateFileConfigField("RichAuthApiKey")
 	c.RichAuthClientId = ""
+	delete(c.envOverrides, "RichAuthClientId")
+	c.updateFileConfigField("RichAuthClientId")
 	c.RichAuthClientSecret = ""
+	delete(c.envOverrides, "RichAuthClientSecret")
+	c.updateFileConfigField("RichAuthClientSecret")
 	c.RichAuthSessionCookie = ""
+	delete(c.envOverrides, "RichAuthSessionCookie")
+	c.updateFileConfigField("RichAuthSessionCookie")
 	c.RichAuthOptionalToken = ""
+	delete(c.envOverrides, "RichAuthOptionalToken")
+	c.updateFileConfigField("RichAuthOptionalToken")
 	c.RichAuthBotToken = ""
+	delete(c.envOverrides, "RichAuthBotToken")
+	c.updateFileConfigField("RichAuthBotToken")
 	c.RichAuthUserToken = ""
+	delete(c.envOverrides, "RichAuthUserToken")
+	c.updateFileConfigField("RichAuthUserToken")
 	if c.AgentcookieManagedByExternalStore() {
 		c.markAgentcookieManaged()
 		// save() persists the full config (credential fields included) for
@@ -441,10 +499,107 @@ func (c *Config) ClearTokens() error {
 	return c.save()
 }
 
+func (c *Config) markEnvOverride(field string) {
+	if c.envOverrides == nil {
+		c.envOverrides = map[string]bool{}
+	}
+	c.envOverrides[field] = true
+}
+
+// cloneStringMap returns an independent copy of m (nil stays nil). The fileConfig
+// snapshot must not share reference-type map fields (such as Headers) with the
+// live config, or a later mutation to one would silently track in the other.
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func (c *Config) snapshotFileConfig() {
+	snapshot := *c
+	snapshot.envOverrides = nil
+	snapshot.fileConfig = nil
+	// *c is a shallow copy: map fields are reference types, so the snapshot would
+	// share them with c and silently track later mutations, defeating the
+	// isolation this snapshot exists to provide. Clone them.
+	snapshot.Headers = cloneStringMap(c.Headers)
+	c.fileConfig = &snapshot
+}
+
+func (c *Config) configForSave() Config {
+	out := *c
+	if c.fileConfig != nil {
+		if c.envOverrides["RichAuthApiKey"] {
+			out.RichAuthApiKey = c.fileConfig.RichAuthApiKey
+		}
+		if c.envOverrides["RichAuthClientId"] {
+			out.RichAuthClientId = c.fileConfig.RichAuthClientId
+		}
+		if c.envOverrides["RichAuthClientSecret"] {
+			out.RichAuthClientSecret = c.fileConfig.RichAuthClientSecret
+		}
+		if c.envOverrides["RichAuthSessionCookie"] {
+			out.RichAuthSessionCookie = c.fileConfig.RichAuthSessionCookie
+		}
+		if c.envOverrides["RichAuthOptionalToken"] {
+			out.RichAuthOptionalToken = c.fileConfig.RichAuthOptionalToken
+		}
+		if c.envOverrides["RichAuthBotToken"] {
+			out.RichAuthBotToken = c.fileConfig.RichAuthBotToken
+		}
+		if c.envOverrides["RichAuthUserToken"] {
+			out.RichAuthUserToken = c.fileConfig.RichAuthUserToken
+		}
+	}
+	out.envOverrides = nil
+	out.fileConfig = nil
+	return out
+}
+
+func (c *Config) updateFileConfigField(field string) {
+	if c.fileConfig == nil || c.envOverrides[field] {
+		return
+	}
+	switch field {
+	case "AuthHeaderVal":
+		c.fileConfig.AuthHeaderVal = c.AuthHeaderVal
+	case "AccessToken":
+		c.fileConfig.AccessToken = c.AccessToken
+	case "RefreshToken":
+		c.fileConfig.RefreshToken = c.RefreshToken
+	case "TokenExpiry":
+		c.fileConfig.TokenExpiry = c.TokenExpiry
+	case "ClientID":
+		c.fileConfig.ClientID = c.ClientID
+	case "ClientSecret":
+		c.fileConfig.ClientSecret = c.ClientSecret
+	case "RichAuthApiKey":
+		c.fileConfig.RichAuthApiKey = c.RichAuthApiKey
+	case "RichAuthClientId":
+		c.fileConfig.RichAuthClientId = c.RichAuthClientId
+	case "RichAuthClientSecret":
+		c.fileConfig.RichAuthClientSecret = c.RichAuthClientSecret
+	case "RichAuthSessionCookie":
+		c.fileConfig.RichAuthSessionCookie = c.RichAuthSessionCookie
+	case "RichAuthOptionalToken":
+		c.fileConfig.RichAuthOptionalToken = c.RichAuthOptionalToken
+	case "RichAuthBotToken":
+		c.fileConfig.RichAuthBotToken = c.RichAuthBotToken
+	case "RichAuthUserToken":
+		c.fileConfig.RichAuthUserToken = c.RichAuthUserToken
+	}
+}
+
 func (c *Config) save() error {
-	var persist any = c
+	persisted := c.configForSave()
+	var persist any = persisted
 	if !c.AgentcookieManagedByExternalStore() {
-		persist = c.persisted()
+		persist = persisted.persisted()
 	}
 	data, err := toml.Marshal(persist)
 	if err != nil {
@@ -454,6 +609,16 @@ func (c *Config) save() error {
 		return err
 	}
 	c.scrubLegacyCredentials()
+	if !c.AgentcookieManagedByExternalStore() {
+		persisted.clearCredentialFields()
+	}
+	c.fileConfig = &persisted
+	c.fileConfig.envOverrides = nil
+	c.fileConfig.fileConfig = nil
+	// persisted shares its map fields with c (configForSave shallow-copies *c),
+	// so isolate the stored fileConfig the same way snapshotFileConfig does;
+	// otherwise later mutations to c's maps leak into the on-disk snapshot.
+	c.fileConfig.Headers = cloneStringMap(c.fileConfig.Headers)
 	return nil
 }
 func (c *Config) scrubLegacyCredentials() {

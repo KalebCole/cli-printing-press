@@ -66,7 +66,11 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 		Aliases: []string{"{{.Endpoint.Alias}}"},
 {{- end}}
 		Short: "{{oneline .Endpoint.Description}}",
-		Example: {{printf "%q" (exampleLine .CommandPath .EndpointName .Endpoint)}},
+{{- $example := exampleLine .CommandPath .EndpointName .Endpoint}}
+{{- if exampleNeedsTODO $example}}
+		// TODO: replace placeholder example values before relying on this for live dogfood.
+{{- end}}
+		Example: {{printf "%q" $example}},
 		Annotations: map[string]string{"pp:endpoint": {{printf "%q" (printf "%s.%s" .ResourceName .EndpointName)}}, "pp:method": {{printf "%q" (upper .Endpoint.Method)}}, "pp:path": {{printf "%q" .EffectivePath}}{{if .IsReadOnly}}, "mcp:read-only": "true"{{end}}{{if .Endpoint.HappyArgs}}, "pp:happy-args": {{printf "%q" .Endpoint.HappyArgs}}{{end}}},
 		RunE: func(cmd *cobra.Command, args []string) error {
 {{- if endpointHasRequiredInput .Endpoint}}
@@ -84,9 +88,15 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- range .Endpoint.Params}}
 {{- if and .Required (not .Positional) (not .Default)}}
+{{- if paramHasEnvDefault .}}
+			if !{{flagChangedExpr .}} && flag{{camel (paramIdent .)}} == "" && !flags.dryRun {
+				return fmt.Errorf("required flag \"%s\" not set", "{{publicFlagName .}}")
+			}
+{{- else}}
 			if !{{flagChangedExpr .}} && !flags.dryRun {
 				return fmt.Errorf("required flag \"%s\" not set", "{{publicFlagName .}}")
 			}
+{{- end}}
 {{- end}}
 {{- end}}
 {{- range .Endpoint.Params}}
@@ -166,7 +176,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- range .Endpoint.Params}}
 {{- if and .PathParam (not .Positional)}}
-			path = replacePathParam(path, "{{.Name}}", fmt.Sprintf("%v", flag{{camel (paramIdent .)}}))
+			path = replacePathParam(path, "{{.Name}}", formatCLIParamValue(flag{{camel (paramIdent .)}}))
 {{- end}}
 {{- end}}
 {{- if $isGraphQLEndpoint}}
@@ -181,7 +191,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				htmlRequestParams["{{.Name}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				htmlRequestParams["{{.Name}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -306,7 +316,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				"{{paramWireName .}}": args[{{positionalIndex $.Endpoint .Name}}],
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
-				"{{paramWireName .}}": fmt.Sprintf("%v", flag{{camel (paramIdent .)}}),
+				"{{paramWireName .}}": formatCLIParamValue(flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
 			}, {{if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}headerOverrides{{else}}nil{{end}}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}", cmd.ErrOrStderr())
@@ -324,7 +334,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 				"{{paramWireName .}}": args[{{positionalIndex $.Endpoint .Name}}],
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
-				"{{paramWireName .}}": fmt.Sprintf("%v", flag{{camel (paramIdent .)}}),
+				"{{paramWireName .}}": formatCLIParamValue(flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
 			}, {{if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}headerOverrides{{else}}nil{{end}}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}")
@@ -337,7 +347,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				params["{{paramWireName .}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -366,7 +376,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				params["{{paramWireName .}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -425,7 +435,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				params["{{paramWireName .}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -473,7 +483,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				params["{{paramWireName .}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -523,7 +533,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				params["{{paramWireName .}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -595,7 +605,7 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- else}}
 {{- range endpointClientSideFilters .APISpec .Endpoint}}
 			if flag{{camel (paramIdent .Param)}} != {{zeroValForParamRequired .Param.Name .Param.Type .Param.Required (hasDefault .Param)}} {
-				data = filterJSONByFieldValues(data, {{printf "%q" .Field}}, fmt.Sprintf("%v", flag{{camel (paramIdent .Param)}}))
+				data = filterJSONByFieldValues(data, {{printf "%q" .Field}}, formatCLIParamValue(flag{{camel (paramIdent .Param)}}))
 			}
 {{- end}}
 {{- if endpointNeedsClientLimit .Endpoint}}
@@ -857,12 +867,20 @@ func new{{cmdIdent .FuncPrefix .EndpointName}}Cmd(flags *rootFlags) *cobra.Comma
 {{- range .Endpoint.Params}}
 {{- if not .Positional}}
 {{- $param := .}}
+{{- if paramHasEnvDefault .}}
+	cmd.Flags().StringVar(&flag{{camel (paramIdent .)}}, "{{publicFlagName .}}", globalScopeParamDefault("{{globalScopeEnvName .}}", {{printf "%q" (globalScopeFallbackValue .)}}), "{{oneline .Description}}{{enumDescriptionHint .Enum}} (env: {{globalScopeEnvName .}})")
+{{- else}}
 	cmd.Flags().{{cobraFlagFuncForParamRequired .Name .Type .Required (hasDefault .)}}(&flag{{camel (paramIdent .)}}, "{{publicFlagName .}}", {{defaultValForParamRequired . .Required (hasDefault .)}}, "{{oneline .Description}}{{enumDescriptionHint .Enum}}")
+{{- end}}
 {{- if isConstDefault .}}
 	_ = cmd.Flags().MarkHidden("{{publicFlagName .}}")
 {{- end}}
 {{- range publicFlagAliases $param}}
+{{- if paramHasEnvDefault $param}}
+	cmd.Flags().StringVar(&flag{{camel (paramIdent $param)}}, "{{.}}", globalScopeParamDefault("{{globalScopeEnvName $param}}", {{printf "%q" (globalScopeFallbackValue $param)}}), "{{oneline $param.Description}}{{enumDescriptionHint $param.Enum}} (env: {{globalScopeEnvName $param}})")
+{{- else}}
 	cmd.Flags().{{cobraFlagFuncForParamRequired $param.Name $param.Type $param.Required (hasDefault $param)}}(&flag{{camel (paramIdent $param)}}, "{{.}}", {{defaultValForParamRequired $param $param.Required (hasDefault $param)}}, "{{oneline $param.Description}}{{enumDescriptionHint $param.Enum}}")
+{{- end}}
 	_ = cmd.Flags().MarkHidden("{{.}}")
 {{- end}}
 {{- end}}

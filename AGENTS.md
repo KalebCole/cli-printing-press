@@ -41,6 +41,8 @@ Hand-written novel commands that perform visible actions (open browser tabs, sen
 1. Print by default; require explicit opt-in (`--launch`, `--send`, `--play`, etc.) to actually act.
 2. Short-circuit when `cliutil.IsVerifyEnv()` is true. The verifier sets `PRINTING_PRESS_VERIFY=1` in every mock-mode subprocess; this env-var check is the floor that catches any side-effect command the verifier's heuristic classifier misses.
 
+OAuth browser authorization flows must also avoid impossible machine-mode combinations. If `--json` or another machine-output mode suppresses the authorize URL and `--no-open` or equivalent disables browser launch, either emit a deliberate structured continuation protocol (`authorize_url`, state handle, expiry, next command) or fail fast with an actionable usage error. Do not wait for a callback that no user or machine can initiate. See `skills/printing-press/references/oauth2-pkce-cli-checklist.md`.
+
 Generated endpoint-mirror commands also gate mutating HTTP verbs (DELETE/POST/PUT/PATCH) at the transport layer (`internal/client/client.go`): under `PRINTING_PRESS_VERIFY=1` they short-circuit to a synthetic noop and never dial, while reads that ride a mutating verb (GraphQL/JSON-RPC reads, POST search; codegen-marked `mcp:read-only`) route through `doRead()` and bypass the gate. The command envelope reports `verify_noop: true` / `success: false`. `cli-printing-press verify` re-enables real HTTP to its mock server via `PRINTING_PRESS_VERIFY_LIVE_HTTP=1`; agents and ad-hoc runs leave it unset (mutations no-op), and live verifiers (`live_dogfood`, `workflow_verify`) strip both vars.
 
 
@@ -176,6 +178,18 @@ Every commit and PR title must include one of the allowed scopes. GitHub squash-
 - If unsure whether a PR is exempt, keep the template.
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the human-facing contributor guide and AI / automation disclosure definitions.
 
+## Automated code review with Greptile
+
+Every PR gets automated Greptile review alongside CI. Resolve every Greptile finding before calling a PR ready: P0 and P1 comments block merge, and P2 comments need either a fix or a concrete reply explaining why the deferral is intentional. Do not use the score alone as the gate.
+
+Greptile feedback is not limited to GitHub review threads. It also edits top-level PR summary comments, and those summaries can contain actionable issue blocks, including `Comments Outside Diff`, even when the thread list has zero unresolved comments. Before saying a PR is ready, run the repo-owned review-state helper:
+
+```bash
+python3 .github/scripts/pr-review-state/greptile_feedback.py <PR_NUMBER>
+```
+
+`PR_NUMBER` is the GitHub pull request number, for example `2492` - not a branch name, URL, issue number, or commit SHA. The helper defaults to `mvanhorn/cli-printing-press` and exits non-zero until all of these are true: Greptile Review passes, the `All conversations resolved` check passes, there are no unresolved non-outdated review threads, the latest `greptile-apps` top-level comment reviewed the current PR head SHA, and that latest comment has no actionable markers such as `Issue 1 of`, `Fix the following`, `Comments Outside Diff`, `remaining open item`, or `Safe to merge after fixing/reviewing`.
+
 ## Versioning
 Releases are automated by release-please. Never manually edit version numbers.
 - Normal feature/fix PRs land through the Mergify queue: add the `ready-to-merge` label when the PR is ready to merge, and let Mergify rebase/test/merge it. Do not use the GitHub merge button for normal PRs once `Mergify Merge Protections` is required on `main`.
@@ -229,6 +243,7 @@ The only supported path for **publishing a generated CLI** (adding or updating a
 - Invoke `/printing-press-publish` and let it drive the fork, branch, manifest checks, push, and PR creation. Following its prompts is the supported flow.
 - Do not skip the skill and improvise the same steps from scratch (manual `gh repo fork` / `cp -r` into a library clone / `gh pr create --repo mvanhorn/printing-press-library …` / branch push to a fork without the skill driving it). The commands look similar; the difference is the preflight checks and conventions the skill enforces before they run.
 - Do not edit `registry.json`, README catalog cells, or `cli-skills/pp-<api-slug>/SKILL.md` in a publish PR — the public library refreshes those post-merge (registry and READMEs from `.printing-press.json` / `manifest.json`; the cli-skills mirror via the library's `generate-skills.yml` workflow). The library's `Guard against hand-edits to cli-skills mirror` check rejects any fork PR whose commits touch the mirror, so committing it pre-rejects the publish before review.
+- Do not hand-bump per-CLI release files. `CHANGELOG.md`, `.printing-press-release.json`, and runtime `var version = ...` are finalized by the public library's post-merge release-ledger workflow. Fresh prints may include blank skeletons; reprints must preserve the existing public-library ledger files when replacing a CLI tree.
 
 The skill enforces preflight checks invisible from this repo's CWD (printer sentinel, manifest shape, vendor-spec PII scope, govulncheck scoped to the changed module) and mirrors the public library's own `AGENTS.md`. If `/printing-press-publish` fails, fix the underlying issue (or report it as a machine bug) — do not bypass the skill to land a CLI-publish PR.
 

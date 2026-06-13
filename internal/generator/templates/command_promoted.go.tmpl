@@ -52,7 +52,11 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 		Use:   "{{.PromotedName}}{{positionalArgs .Endpoint}}",
 		Short: "{{oneline .Endpoint.Description}}",
 		Long:  "{{oneline .Endpoint.Description}}",
-		Example: {{printf "%q" (promotedExampleLine .PromotedName .Endpoint)}},
+{{- $example := promotedExampleLine .PromotedName .Endpoint}}
+{{- if exampleNeedsTODO $example}}
+		// TODO: replace placeholder example values before relying on this for live dogfood.
+{{- end}}
+		Example: {{printf "%q" $example}},
 		Annotations: map[string]string{"pp:endpoint": {{printf "%q" (printf "%s.%s" .ResourceName .EndpointName)}}, "pp:method": {{printf "%q" (upper .Endpoint.Method)}}, "pp:path": {{printf "%q" .EffectivePath}}{{if .IsReadOnly}}, "mcp:read-only": "true"{{end}}{{if .Endpoint.HappyArgs}}, "pp:happy-args": {{printf "%q" .Endpoint.HappyArgs}}{{end}}},
 		RunE: func(cmd *cobra.Command, args []string) error {
 {{- if endpointHasRequiredInput .Endpoint}}
@@ -148,7 +152,7 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 {{- end}}
 {{- range .Endpoint.Params}}
 {{- if and .PathParam (not .Positional)}}
-			path = replacePathParam(path, "{{.Name}}", fmt.Sprintf("%v", flag{{camel (paramIdent .)}}))
+			path = replacePathParam(path, "{{.Name}}", formatCLIParamValue(flag{{camel (paramIdent .)}}))
 {{- end}}
 {{- end}}
 
@@ -160,7 +164,7 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				htmlRequestParams["{{paramWireName .}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				htmlRequestParams["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -185,7 +189,7 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 				"{{paramWireName .}}": args[{{positionalIndex $.Endpoint .Name}}],
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
-				"{{paramWireName .}}": fmt.Sprintf("%v", flag{{camel (paramIdent .)}}),
+				"{{paramWireName .}}": formatCLIParamValue(flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
 			}, {{if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}headerOverrides{{else}}nil{{end}}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}", cmd.ErrOrStderr())
@@ -203,7 +207,7 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 				"{{paramWireName .}}": args[{{positionalIndex $.Endpoint .Name}}],
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
-				"{{paramWireName .}}": fmt.Sprintf("%v", flag{{camel (paramIdent .)}}),
+				"{{paramWireName .}}": formatCLIParamValue(flag{{camel (paramIdent .)}}),
 {{- end}}
 {{- end}}
 			}, {{if or .Endpoint.HeaderOverrides .Endpoint.UsesBinaryResponse}}headerOverrides{{else}}nil{{end}}, flagAll, "{{.Endpoint.Pagination.CursorParam}}", "{{.Endpoint.Pagination.Type}}", "{{.Endpoint.Pagination.LimitParam}}", "{{.Endpoint.Pagination.NextCursorPath}}", "{{.Endpoint.Pagination.HasMoreField}}")
@@ -217,7 +221,7 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 {{- end}}
 {{- if and (not .Positional) (not .PathParam)}}
 			if flag{{camel (paramIdent .)}} != {{zeroValForParamRequired .Name .Type .Required (hasDefault .)}} {
-				params["{{paramWireName .}}"] = fmt.Sprintf("%v", flag{{camel (paramIdent .)}})
+				params["{{paramWireName .}}"] = formatCLIParamValue(flag{{camel (paramIdent .)}})
 			}
 {{- end}}
 {{- end}}
@@ -292,13 +296,13 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 			data, err := c.Get(cmd.Context(), path, params)
 {{- end}}
 {{- end}}
-{{- if and .HasStore (ne (upper .Endpoint.Method) "GET")}}
-			prov := attachFreshness(DataProvenance{Source: "live"}, flags)
-{{- end}}
 {{- end}}
 			if err != nil {
 				return classifyAPIError(err, flags)
 			}
+{{- if and .HasStore (ne (upper .Endpoint.Method) "GET") (not $supportsAllPagination)}}
+			prov := attachFreshness(DataProvenance{Source: "live"}, flags)
+{{- end}}
 {{- if $canWriteBack}}
 			var partialFailure *partialFailureReport
 			if !flags.dryRun && statusCode >= 200 && statusCode < 300 {
@@ -325,7 +329,7 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 {{- else}}
 {{- range endpointClientSideFilters .APISpec .Endpoint}}
 			if flag{{camel (paramIdent .Param)}} != {{zeroValForParamRequired .Param.Name .Param.Type .Param.Required (hasDefault .Param)}} {
-				data = filterJSONByFieldValues(data, {{printf "%q" .Field}}, fmt.Sprintf("%v", flag{{camel (paramIdent .Param)}}))
+				data = filterJSONByFieldValues(data, {{printf "%q" .Field}}, formatCLIParamValue(flag{{camel (paramIdent .Param)}}))
 			}
 {{- end}}
 {{- if endpointNeedsClientLimit .Endpoint}}
@@ -442,6 +446,9 @@ func new{{cmdIdent .PromotedName}}PromotedCmd(flags *rootFlags) *cobra.Command {
 		sub.Hidden = false // unhide: the raw parent is hidden but these are useful under the promoted command
 		cmd.AddCommand(sub)
 	}
+{{- end}}
+{{- range .NovelChildren}}
+	cmd.AddCommand(newNovel{{.Ident}}Cmd(flags))
 {{- end}}
 
 	return cmd

@@ -79,9 +79,13 @@ func TestGeneratedBLEDeviceEmitsPublishArtifacts(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "ble-temperature-sensor")
 	require.NoError(t, NewDevice(ds, outputDir).Generate())
 
-	for _, name := range []string{"AGENTS.md", "LICENSE", "NOTICE", ".goreleaser.yaml"} {
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", ".goreleaser.yaml"} {
 		assert.FileExists(t, filepath.Join(outputDir, name))
 	}
+
+	// Claude Code auto-loads CLAUDE.md, not AGENTS.md; the device variant emits a
+	// CLAUDE.md that imports the contract.
+	assert.Equal(t, "@AGENTS.md", strings.TrimSpace(readFileString(t, filepath.Join(outputDir, "CLAUDE.md"))))
 
 	// None of the four may contain an unrendered Go-template directive. The
 	// goreleaser file legitimately carries goreleaser's own `{{ .Version }}`
@@ -169,7 +173,7 @@ func TestGeneratedBLEDeviceEmitsMCPSurface(t *testing.T) {
 	// The MCP server version must be an ldflag-overridable var, not a hardcoded
 	// literal — the device .goreleaser injects -X main.version at release time, so
 	// a bare "1.0.0" in NewMCPServer would make that injection a silent no-op.
-	assert.Contains(t, mcpMain, `var version = "1.0.0"`)
+	assert.Contains(t, mcpMain, `var version = "0.0.0-dev"`)
 	assert.NotContains(t, mcpMain, "\n\t\t\"1.0.0\",\n\t\tserver.WithToolCapabilities(false),")
 
 	toolsSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "tools.go"))

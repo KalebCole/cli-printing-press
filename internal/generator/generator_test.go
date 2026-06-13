@@ -49,6 +49,7 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		"go.mod",
 		"Makefile",
 		"AGENTS.md",
+		"CLAUDE.md",
 		"README.md",
 		"SKILL.md",
 		"internal/cli/root.go",
@@ -99,9 +100,9 @@ func TestGenerateProjectsCompile(t *testing.T) {
 		// Bump it AND add to mustInclude above when adding always-emitted
 		// templates. Per-spec dynamic files (per-resource command files,
 		// generated tests) account for the difference between fixtures.
-		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 76},
-		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 81},
-		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 78},
+		{name: "stytch", specPath: filepath.Join("..", "..", "testdata", "stytch.yaml"), expectedFiles: 78},
+		{name: "clerk", specPath: filepath.Join("..", "..", "testdata", "clerk.yaml"), expectedFiles: 82},
+		{name: "loops", specPath: filepath.Join("..", "..", "testdata", "loops.yaml"), expectedFiles: 80},
 	}
 
 	for _, tt := range tests {
@@ -2210,15 +2211,16 @@ func TestGenerate403HintsFollowAuthMode(t *testing.T) {
 			helpers: snippetCheck{
 				want: []string{
 					"Your credentials are valid but lack access",
-					"Check that your API key has the required permissions",
-					"Set it with: export MYAPI_TOKEN=<your-key>",
+					"Check that your credentials have the required permissions and match the API's expected auth scheme.",
+					`Set your API key with: export MYAPI_TOKEN=\"your-token-here\"`,
 				},
 				reject: []string{"This API is configured without credentials"},
 			},
 			mcp: snippetCheck{
 				want: []string{
 					"your credentials are valid but lack access",
-					"Set it with: export MYAPI_TOKEN=<your-key>",
+					"match the API's expected auth scheme",
+					`Set your API key with: export MYAPI_TOKEN=\"your-token-here\"`,
 				},
 				reject: []string{"this API is configured without credentials"},
 			},
@@ -3726,8 +3728,10 @@ func TestGenerateMCPSQLToolUsesReadOnlyStore(t *testing.T) {
 	// the DSN starts with "file:". Without the prefix, ?mode=ro is
 	// silently dropped and writes succeed against the supposedly
 	// read-only handle.
-	assert.Contains(t, storeCode, `"file:"+dbPath+"?mode=ro`,
+	assert.Contains(t, storeCode, `dsn := "file:" + dbPath`,
 		"OpenReadOnly DSN must use the file: URI prefix with mode=ro")
+	assert.Contains(t, storeCode, `?mode=ro`,
+		"OpenReadOnly DSN must request SQLite read-only mode")
 
 	mcpSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "tools.go"))
 	require.NoError(t, err)
@@ -3755,6 +3759,8 @@ func TestGenerateMCPSQLToolUsesReadOnlyStore(t *testing.T) {
 		"mcp package must expose validateReadOnlyQuery — the gate that handleSQL must call before opening the store")
 	assert.Contains(t, mcpCode, `func stripLeadingSQLNoise(`,
 		"mcp package must expose stripLeadingSQLNoise — without it the gate's HasPrefix check is bypassable by SQL comments and semicolons that SQLite skips before parsing")
+	assert.Contains(t, mcpCode, `func hasTrailingSQLStatement(`,
+		"mcp package must expose hasTrailingSQLStatement so SELECT-prefix multi-statement payloads cannot append mutating SQL after the read-only allowlist")
 	// handleSQL must dispatch through validateReadOnlyQuery; a regression
 	// to inline HasPrefix-on-blocklist would silently restore the
 	// comment-prefix bypass.
@@ -3772,6 +3778,10 @@ func TestGenerateMCPSQLToolUsesReadOnlyStore(t *testing.T) {
 	mcpTestCode := string(mcpTestSrc)
 	assert.Contains(t, mcpTestCode, "TestValidateReadOnlyQuery_RejectsBypassVectors",
 		"behavioral coverage of comment-prefix and statement-separator bypass vectors must ship into every printed CLI's mcp package")
+	assert.Contains(t, mcpTestCode, "TestHasTrailingSQLStatement",
+		"behavioral coverage of multi-statement parsing must ship into every printed CLI's mcp package")
+
+	requireGeneratedCompiles(t, outputDir)
 }
 
 // TestGenerateMCPSQLToolSurfacesRowErrors pins the emitted handleSQL error
@@ -3811,6 +3821,40 @@ func TestGenerateMCPSQLToolSurfacesRowErrors(t *testing.T) {
 	// Compile-check the emission: the cols, err := redeclaration reusing the
 	// err already bound by db.Query must still build.
 	requireGeneratedCompiles(t, outputDir)
+}
+
+func TestGenerateMCPToolResultTextBudgetTestsPass(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("mcp-result-budget")
+	apiSpec.Resources = map[string]spec.Resource{
+		"groups": {
+			Description: "Groups",
+			Endpoints: map[string]spec.Endpoint{
+				"list": {
+					Method:      "GET",
+					Path:        "/groups",
+					Description: "List groups",
+					Response:    spec.ResponseDef{Type: "array", Item: "Group"},
+				},
+			},
+		},
+	}
+	apiSpec.Types = map[string]spec.TypeDef{
+		"Group": {
+			Fields: []spec.TypeField{
+				{Name: "id", Type: "string"},
+				{Name: "name", Type: "string"},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{MCP: true}
+	require.NoError(t, gen.Generate())
+
+	runGoCommand(t, outputDir, "test", "./internal/mcp", "-run", "TestMCPToolResultText")
 }
 
 // stripGoComments removes // line comments and /* ... */ block comments from
@@ -3957,6 +4001,8 @@ func TestSyncExtractPaginationNestedCursor(t *testing.T) {
 		"sync.go must parse JSON:API links.next cursors")
 	assert.Contains(t, src, `"response_metadata"`,
 		"paginationWrapperKeys must include response_metadata (Slack's envelope)")
+	assert.Contains(t, src, `"additional_data"`,
+		"paginationWrapperKeys must include additional_data (Pipedrive V2's envelope)")
 	assert.Contains(t, src, `"pagination"`,
 		"paginationWrapperKeys must include pagination (MongoDB Atlas-style)")
 	assert.Contains(t, src, `"features"`,
@@ -4061,6 +4107,23 @@ func TestExtractPageItemsMongoPaginationEnvelope(t *testing.T) {
 	}
 	if !hasMore {
 		t.Fatalf("want hasMore=true when nested cursor is present")
+	}
+}
+
+func TestExtractPageItemsPipedriveAdditionalDataEnvelope(t *testing.T) {
+	body := []byte(` + "`" + `{
+		"data": [{"id":"deal-1"},{"id":"deal-2"}],
+		"additional_data": {"next_cursor": "pd-next"}
+	}` + "`" + `)
+	items, cursor, hasMore := extractPageItems(json.RawMessage(body), "cursor")
+	if len(items) != 2 {
+		t.Fatalf("want 2 items, got %d", len(items))
+	}
+	if cursor != "pd-next" {
+		t.Fatalf("want cursor pd-next, got %q", cursor)
+	}
+	if !hasMore {
+		t.Fatalf("want hasMore=true when additional_data.next_cursor is present")
 	}
 }
 
@@ -5233,11 +5296,11 @@ func TestSyncDependentResourcePopulatesTypedParentFK(t *testing.T) {
 		t.Fatalf("iterate contacts: %v", err)
 	}
 
-	if got["contact-injected"] != "list-A" {
-		t.Fatalf("injected contact lists_id = %q, want list-A", got["contact-injected"])
+	if got["contact-injected\x00list-A"] != "list-A" {
+		t.Fatalf("injected contact lists_id = %q, want list-A", got["contact-injected\x00list-A"])
 	}
-	if got["contact-preserved"] != "api-list" {
-		t.Fatalf("preserved contact lists_id = %q, want api-list", got["contact-preserved"])
+	if got["contact-preserved\x00api-list"] != "api-list" {
+		t.Fatalf("preserved contact lists_id = %q, want api-list", got["contact-preserved\x00api-list"])
 	}
 }
 `
@@ -6570,9 +6633,10 @@ func (e *jsonSyntaxStub) Error() string { return e.msg }
 // for records that don't match the canonical id/name/title allowlist:
 //
 //  1. The static allow-list covers canonical scalars (price/fare/locale/code/...).
-//  2. A data-driven extension keeps any scalar key present in 80%+ of rows,
-//     so hand-written novel commands whose output keys aren't on the
-//     allow-list (object_name, match_key, snippet) survive projection.
+//  2. A data-driven extension keeps any non-blocklisted key present in
+//     80%+ of rows, so hand-written novel commands whose output keys
+//     aren't on the allow-list (object_name, match_key, snippet, series,
+//     metrics) survive projection.
 //  3. Verbose fields (description, body, ...) are excluded from the
 //     extension regardless of frequency.
 //  4. A per-item fallback preserves the original item when no key matches.
@@ -6609,12 +6673,94 @@ func TestCompactListFieldsPreservesUnknownShapes(t *testing.T) {
 	// (e.g. {"id":"x","object_name":"users","match_key":"uuid"} -> {"id":"x"}).
 	assert.Contains(t, body, "keyCounts",
 		"compactListFields must count per-key occurrence so frequent novel-command keys survive")
-	assert.Contains(t, body, "isCompactScalar",
-		"compactListFields must filter the data-driven extension by scalar type so nested objects/arrays don't bloat --compact output")
 	assert.Contains(t, body, "compactVerboseListFields",
 		"compactListFields must exclude description/body/content from the data-driven extension regardless of frequency")
 	assert.Contains(t, body, "threshold",
 		"compactListFields must compute a frequency threshold for the data-driven extension")
+}
+
+func TestGeneratedCompactListFieldsPreservesFrequentNestedPayloads(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("compact-nested")
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	runtimeTest := `package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+)
+
+func TestCompactFieldsKeepsFrequentNestedPayloads(t *testing.T) {
+	input := json.RawMessage(` + "`" + `[
+		{"id":"lead","series":[1,2],"metrics":{"clicks":10},"rare":{"only":1},"body":"verbose"},
+		{"id":"sale","series":[3,4],"metrics":{"clicks":20},"body":"verbose"},
+		{"id":"trial","series":[5,6],"body":"verbose"}
+	]` + "`" + `)
+
+	got := compactFields(input)
+	var rows []map[string]any
+	if err := json.Unmarshal(got, &rows); err != nil {
+		t.Fatalf("compactFields returned invalid JSON: %v\n%s", err, got)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3: %s", len(rows), got)
+	}
+	for i, row := range rows {
+		if _, ok := row["series"].([]any); !ok {
+			t.Fatalf("row %d dropped frequent nested series: %#v", i, row)
+		}
+		if _, ok := row["body"]; ok {
+			t.Fatalf("row %d kept blocklisted body field: %#v", i, row)
+		}
+		if _, ok := row["rare"]; ok {
+			t.Fatalf("row %d kept sparse nested field: %#v", i, row)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, ok := rows[i]["metrics"].(map[string]any); !ok {
+			t.Fatalf("row %d dropped majority nested metrics: %#v", i, rows[i])
+		}
+	}
+	if _, ok := rows[2]["metrics"]; ok {
+		t.Fatalf("row 2 invented missing metrics field: %#v", rows[2])
+	}
+}
+
+func TestPrintJSONFilteredSelectOverridesCompact(t *testing.T) {
+	payload := []map[string]any{
+		{"id":"lead","series":[]any{1, 2},"rare":map[string]any{"only":1}},
+		{"id":"sale","series":[]any{3, 4}},
+	}
+	flags := &rootFlags{asJSON: true, compact: true, selectFields: "rare"}
+	var out bytes.Buffer
+	if err := printJSONFiltered(&out, payload, flags); err != nil {
+		t.Fatalf("printJSONFiltered failed: %v", err)
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("printJSONFiltered returned invalid JSON: %v\n%s", err, out.String())
+	}
+	if _, ok := rows[0]["rare"].(map[string]any); !ok {
+		t.Fatalf("--select did not keep explicitly requested rare field: %#v", rows[0])
+	}
+	if _, ok := rows[0]["series"]; ok {
+		t.Fatalf("--compact ran before --select and kept series unexpectedly: %#v", rows[0])
+	}
+	if _, ok := rows[0]["id"]; ok {
+		t.Fatalf("--select should drop unrequested id field: %#v", rows[0])
+	}
+}
+`
+	testPath := filepath.Join(outputDir, "internal", "cli", "compact_list_fields_runtime_test.go")
+	require.NoError(t, os.WriteFile(testPath, []byte(runtimeTest), 0o644))
+
+	requireGeneratedCompiles(t, outputDir)
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "TestCompactFieldsKeepsFrequentNestedPayloads|TestPrintJSONFilteredSelectOverridesCompact", "-count=1")
 }
 
 // matchClosingBrace walks s from start, finds the first `{`, then returns
@@ -8303,6 +8449,45 @@ func TestGeneratedCommandExampleKeepsDispatchParamDefault(t *testing.T) {
 	assert.Contains(t, string(listSrc), `dispatch-default-pp-cli domain list --limit 50`)
 }
 
+func TestGeneratedCommandExampleUsesSchemaHintsForRequiredParams(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("schema-hints")
+	apiSpec.Resources["reports"] = spec.Resource{
+		Description: "Reports",
+		Endpoints: map[string]spec.Endpoint{
+			"create": {
+				Method:      "POST",
+				Path:        "/reports",
+				Description: "Create report",
+				Params: []spec.Param{
+					{Name: "exampleParam", Type: "string", Required: true, Example: "from-example", Description: "Explicit example"},
+					{Name: "enumParam", Type: "string", Required: true, Enum: []string{"snippet"}, Description: "Enum parameter"},
+					{Name: "defaultParam", Type: "string", Required: true, Default: []any{"from-default"}, Description: "Default parameter"},
+					{Name: "app", Type: "string", Required: true, Description: "App name, e.g. INSTANTLY, SMARTLEAD"},
+					{Name: "fallback", Type: "string", Required: true, Description: "Fallback parameter"},
+				},
+				Body: []spec.Param{
+					{Name: "kind", Type: "string", Required: true, Example: "summary", Description: "Report kind"},
+				},
+			},
+			"list": {
+				Method:      "GET",
+				Path:        "/reports",
+				Description: "List reports",
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	source := readGeneratedFile(t, outputDir, "internal", "cli", "reports_create.go")
+	assert.Contains(t, source, `schema-hints-pp-cli reports create --example-param from-example --enum-param snippet --default-param from-default --app INSTANTLY --fallback example-value --kind summary`)
+	assert.Contains(t, source, `// TODO: replace placeholder example values before relying on this for live dogfood.`)
+	requireGeneratedCompiles(t, outputDir)
+}
+
 func TestGeneratedCommandExamplePrefersNarrativeQuickStart(t *testing.T) {
 	t.Parallel()
 
@@ -9496,6 +9681,153 @@ func TestGeneratedHelpers_BearerTokenAuth(t *testing.T) {
 	assert.Contains(t, content, "cliutil.LooksLikeAuthError")
 }
 
+func TestGeneratedAuthHints_DoNotDuplicateRecoveryCommands(t *testing.T) {
+	t.Run("oauth2 error branches keep a single auth login hint", func(t *testing.T) {
+		t.Parallel()
+
+		apiSpec := minimalSpec("oauth2hints")
+		apiSpec.Auth = spec.AuthConfig{
+			Type:    "oauth2",
+			EnvVars: []string{"OAUTH2HINTS_TOKEN"},
+		}
+
+		outputDir := filepath.Join(t.TempDir(), "oauth2hints-pp-cli")
+		require.NoError(t, New(apiSpec, outputDir).Generate())
+
+		helpers := readGeneratedFile(t, outputDir, "internal", "cli", "helpers.go")
+		helpers401 := generatedSourceBlock(t, helpers, `case strings.Contains(msg, "HTTP 401"):`, `case strings.Contains(msg, "HTTP 403"):`)
+		assert.Equal(t, 1, strings.Count(helpers401, "auth login"), helpers401)
+		helpers403 := generatedSourceBlock(t, helpers, `case strings.Contains(msg, "HTTP 403"):`, `case strings.Contains(msg, "HTTP 404"):`)
+		assert.Equal(t, 1, strings.Count(helpers403, "auth login"), helpers403)
+
+		tools := readGeneratedFile(t, outputDir, "internal", "mcp", "tools.go")
+		tools401 := generatedSourceBlock(t, tools, `case strings.Contains(msg, "HTTP 401"):`, `case strings.Contains(msg, "HTTP 403"):`)
+		assert.Equal(t, 1, strings.Count(tools401, "auth login"), tools401)
+		tools403 := generatedSourceBlock(t, tools, `case strings.Contains(msg, "HTTP 403"):`, `default:`)
+		assert.Equal(t, 1, strings.Count(tools403, "auth login"), tools403)
+
+		doctor := readGeneratedFile(t, outputDir, "internal", "cli", "doctor.go")
+		assert.Contains(t, doctor, `report["auth_hint"] = "Run 'oauth2hints-pp-cli auth login' to re-authenticate."`)
+
+		requireGeneratedCompiles(t, outputDir)
+	})
+
+	t.Run("bearer token 401 branches keep a single set-token hint", func(t *testing.T) {
+		t.Parallel()
+
+		apiSpec := minimalSpec("bearerhints")
+		apiSpec.Auth = spec.AuthConfig{
+			Type:    "bearer_token",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"BEARERHINTS_TOKEN"},
+		}
+
+		outputDir := filepath.Join(t.TempDir(), "bearerhints-pp-cli")
+		require.NoError(t, New(apiSpec, outputDir).Generate())
+
+		helpers := readGeneratedFile(t, outputDir, "internal", "cli", "helpers.go")
+		helpers401 := generatedSourceBlock(t, helpers, `case strings.Contains(msg, "HTTP 401"):`, `case strings.Contains(msg, "HTTP 403"):`)
+		assert.Equal(t, 1, strings.Count(helpers401, "auth set-token <token>"), helpers401)
+		assert.Contains(t, helpers401, `or export BEARERHINTS_TOKEN=\"your-token-here\"`)
+
+		tools := readGeneratedFile(t, outputDir, "internal", "mcp", "tools.go")
+		tools401 := generatedSourceBlock(t, tools, `case strings.Contains(msg, "HTTP 401"):`, `case strings.Contains(msg, "HTTP 403"):`)
+		assert.Equal(t, 1, strings.Count(tools401, "auth set-token <token>"), tools401)
+
+		requireGeneratedCompiles(t, outputDir)
+	})
+}
+
+func generatedSourceBlock(t *testing.T, body, start, end string) string {
+	t.Helper()
+
+	startIdx := strings.Index(body, start)
+	require.NotEqual(t, -1, startIdx, "missing start marker %q", start)
+	body = body[startIdx:]
+	endIdx := strings.Index(body[len(start):], end)
+	require.NotEqual(t, -1, endIdx, "missing end marker %q", end)
+	return body[:len(start)+endIdx]
+}
+
+func TestGeneratedAuthHints_BasicCredentialsAreSchemeAware(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "basicauth",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:   "api_key",
+			Header: "Authorization",
+			Format: "Basic {username}:{password}",
+			EnvVarSpecs: []spec.AuthEnvVar{
+				{Name: "BASICAUTH_USERNAME", Kind: spec.AuthEnvVarKindPerCall, Required: true, Sensitive: false},
+				{Name: "BASICAUTH_PASSWORD", Kind: spec.AuthEnvVarKindPerCall, Required: true, Sensitive: true},
+			},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/basicauth-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Description: "Manage items",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/items", Description: "List items"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "basicauth-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	helpersGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "helpers.go"))
+	require.NoError(t, err)
+	helpers := string(helpersGo)
+	assert.Contains(t, helpers, `Set Basic credentials with: export BASICAUTH_USERNAME=\"your-username\" BASICAUTH_PASSWORD=\"your-password\"`)
+	assert.Contains(t, helpers, "check your Basic credentials")
+	assert.NotContains(t, helpers, "hint: check your API key")
+	assert.NotContains(t, helpers, "Set your API key: export BASICAUTH_USERNAME=<your-key>")
+	assert.Contains(t, helpers, `Response: "+cliutil.SanitizeErrorBody(msg)`)
+
+	mcpGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "tools.go"))
+	require.NoError(t, err)
+	mcp := string(mcpGo)
+	assert.Contains(t, mcp, `Set Basic credentials with: export BASICAUTH_USERNAME=\"your-username\" BASICAUTH_PASSWORD=\"your-password\"`)
+	assert.Contains(t, mcp, "check your Basic credentials")
+	assert.NotContains(t, mcp, "hint: check your API key")
+	assert.NotContains(t, mcp, "Set your API key: export BASICAUTH_USERNAME=<your-key>")
+	assert.Contains(t, mcp, `"authentication failed: " + cliutil.SanitizeErrorBody(msg)`)
+
+	doctorGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "doctor.go"))
+	require.NoError(t, err)
+	doctor := string(doctorGo)
+	assert.Contains(t, doctor, `report["auth_hint"] = "Set Basic credentials with: export BASICAUTH_USERNAME=\"your-username\" BASICAUTH_PASSWORD=\"your-password\""`)
+	assert.NotContains(t, doctor, `report["auth_hint"] = "export BASICAUTH_USERNAME=<your-key>"`)
+
+	authGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "auth.go"))
+	require.NoError(t, err)
+	auth := string(authGo)
+	assert.Contains(t, auth, `export BASICAUTH_USERNAME=\"your-username\"`)
+	assert.Contains(t, auth, `export BASICAUTH_PASSWORD=\"your-password\"`)
+	setupStart := strings.Index(auth, "func newAuthSetupCmd")
+	require.NotEqual(t, -1, setupStart)
+	setupEnd := strings.Index(auth[setupStart:], "func newAuthStatusCmd")
+	require.NotEqual(t, -1, setupEnd)
+	assert.NotContains(t, auth[setupStart:setupStart+setupEnd], `basicauth-pp-cli auth set-token <token>`)
+	statusStart := strings.Index(auth, "func newAuthStatusCmd")
+	require.NotEqual(t, -1, statusStart)
+	statusEnd := strings.Index(auth[statusStart:], "func newAuthSetTokenCmd")
+	require.NotEqual(t, -1, statusEnd)
+	statusBlock := auth[statusStart : statusStart+statusEnd]
+	assert.Contains(t, statusBlock, "Set your credentials:")
+	assert.NotContains(t, statusBlock, `basicauth-pp-cli auth set-token <token>`)
+
+	requireGeneratedCompiles(t, outputDir)
+}
+
 func TestGeneratedHelpers_NoAuth_No400Branch(t *testing.T) {
 	t.Parallel()
 
@@ -9653,7 +9985,7 @@ func TestGeneratedDoctor_AuthHintsWithKeyURL(t *testing.T) {
 	content := string(doctorGo)
 
 	// Should contain the env var hint
-	assert.Contains(t, content, `export STEAM_API_KEY=<your-key>`)
+	assert.Contains(t, content, `Set your API key with: export STEAM_API_KEY=\"your-token-here\"`)
 	// Should contain the key URL
 	assert.Contains(t, content, `https://steamcommunity.com/dev/apikey`)
 }
@@ -9695,7 +10027,7 @@ func TestGeneratedDoctor_AuthHintsWithoutKeyURL(t *testing.T) {
 	content := string(doctorGo)
 
 	// Should contain the env var hint
-	assert.Contains(t, content, `export NOURL_API_KEY=<your-key>`)
+	assert.Contains(t, content, `Set your API key with: export NOURL_API_KEY=\"your-token-here\"`)
 	// Should NOT contain any key URL line
 	assert.NotContains(t, content, "auth_key_url")
 }
@@ -10792,6 +11124,58 @@ func TestGenerateMCPContextEscapesDomainStrings(t *testing.T) {
 	assert.Contains(t, src, `filter=\"active\"`)
 }
 
+func TestGeneratePreservesDescriptionHeadlinesAcrossAgentSurfaces(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("headlinecopy")
+	headline := "The first CLI for Scrape.do: requests, browsers, proxies, retries, webhook replay, license seats, churn analytics, and local SQLite workflows no other tool ships"
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet.MCP = true
+	gen.Narrative = &ReadmeNarrative{
+		Headline:       headline,
+		TriggerPhrases: []string{"check Scrape.do usage"},
+	}
+	require.NoError(t, gen.Generate())
+
+	skill, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(skill), headline+". Trigger phrases: `check Scrape.do usage`.")
+	assert.NotContains(t, string(skill), "Scrape. Trigger phrases")
+	assert.NotContains(t, string(skill), "ships.. Trigger phrases")
+
+	goreleaser, err := os.ReadFile(filepath.Join(outputDir, ".goreleaser.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(goreleaser), `description: "`+headline+`"`)
+
+	agentContext, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "agent_context.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(agentContext), `Description: "`+headline+`"`)
+
+	mcpTools, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "tools.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(mcpTools), `"description": "`+headline+`"`)
+}
+
+func TestGenerateSkillTriggerPhraseTailDoesNotDoublePunctuate(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("punctuatedheadline")
+	headline := "Search routes, compare prices, and track reliability."
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		Headline:       headline,
+		TriggerPhrases: []string{"track route reliability"},
+	}
+	require.NoError(t, gen.Generate())
+
+	skill, err := os.ReadFile(filepath.Join(outputDir, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(skill), headline+" Trigger phrases: `track route reliability`.")
+	assert.NotContains(t, string(skill), "reliability.. Trigger phrases")
+}
+
 func TestGenerateMCPCompactsRepeatedParamDescriptions(t *testing.T) {
 	t.Parallel()
 
@@ -11379,6 +11763,12 @@ func TestGeneratedSyncMaxPagesAndStickyCursor(t *testing.T) {
 	assert.Contains(t, syncContent,
 		`{"event":"sync_warning","resource":"%s","parent":"%s","reason":"stuck_pagination"`,
 		"dependent-resource stuck-pagination must emit a structured sync_warning")
+	assert.Contains(t, syncContent,
+		`{"event":"sync_warning","resource":"%s","reason":"pagination_cursor_missing"`,
+		"flat-path full-page-without-cursor must emit a structured sync_warning")
+	assert.Contains(t, syncContent,
+		`{"event":"sync_warning","resource":"%s","parent":"%s","reason":"pagination_cursor_missing"`,
+		"dependent-resource full-page-without-cursor must emit a structured sync_warning")
 
 	// AGENTS.md: emission must use the "%s" embedded-quote pattern, not
 	// %q. A %q usage here would be a real bug — JSON shapes for resource
@@ -11437,6 +11827,72 @@ func (c *resumeCursorClient) Get(ctx context.Context, path string, params map[st
 
 func (c *resumeCursorClient) RateLimit() float64 {
 	return 0
+}
+
+type fullNoCursorClient struct {
+	calls int
+	explicitFinalPage bool
+}
+
+func (c *fullNoCursorClient) Get(ctx context.Context, path string, params map[string]string) (json.RawMessage, error) {
+	c.calls++
+	items := make([]map[string]string, 100)
+	for i := range items {
+		items[i] = map[string]string{"id": "item-" + strconv.Itoa(i)}
+	}
+	response := map[string]any{
+		"items": items,
+	}
+	if c.explicitFinalPage {
+		response["has_more"] = false
+	}
+	return json.Marshal(response)
+}
+
+func (c *fullNoCursorClient) RateLimit() float64 {
+	return 0
+}
+
+func TestSyncResourceWarnsOnFullPageWithoutCursor(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	client := &fullNoCursorClient{}
+	var events strings.Builder
+	res := syncResource(context.Background(), client, db, "channels", "", false, 0, false, nil, &events)
+	if res.Err != nil {
+		t.Fatalf("syncResource error: %v", res.Err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("calls = %d, want 1", client.calls)
+	}
+	if !strings.Contains(events.String(), ` + "`" + `"reason":"pagination_cursor_missing"` + "`" + `) {
+		t.Fatalf("sync events missing pagination_cursor_missing warning: %s", events.String())
+	}
+}
+
+func TestSyncResourceDoesNotWarnOnExplicitFinalFullPage(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	client := &fullNoCursorClient{explicitFinalPage: true}
+	var events strings.Builder
+	res := syncResource(context.Background(), client, db, "channels", "", false, 0, false, nil, &events)
+	if res.Err != nil {
+		t.Fatalf("syncResource error: %v", res.Err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("calls = %d, want 1", client.calls)
+	}
+	if strings.Contains(events.String(), ` + "`" + `"reason":"pagination_cursor_missing"` + "`" + `) {
+		t.Fatalf("sync events should not warn on explicit final full page: %s", events.String())
+	}
 }
 
 func TestSyncResourcePreservesCursorOnMaxPagesCap(t *testing.T) {
@@ -11502,6 +11958,9 @@ func TestSyncResourceClearsCursorWhenCapEqualsFinalPage(t *testing.T) {
 	}
 	defer db.Close()
 
+	if err := db.Upsert("channels", "existing", []byte(` + "`" + `{"id":"existing"}` + "`" + `)); err != nil {
+		t.Fatalf("seed existing channel: %v", err)
+	}
 	if err := db.SaveSyncState("channels", "page-3", 200); err != nil {
 		t.Fatalf("seed sync state: %v", err)
 	}
@@ -11530,6 +11989,9 @@ func TestSyncResourceClearsSelfReferentialCursorOnMaxPagesCap(t *testing.T) {
 	}
 	defer db.Close()
 
+	if err := db.Upsert("channels", "existing", []byte(` + "`" + `{"id":"existing"}` + "`" + `)); err != nil {
+		t.Fatalf("seed existing channel: %v", err)
+	}
 	if err := db.SaveSyncState("channels", "stuck", 100); err != nil {
 		t.Fatalf("seed sync state: %v", err)
 	}
@@ -11552,7 +12014,7 @@ func TestSyncResourceClearsSelfReferentialCursorOnMaxPagesCap(t *testing.T) {
 }
 `
 	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "sync_resume_cursor_test.go"), []byte(behaviorTest), 0o644))
-	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "^TestSyncResource(PreservesCursorOnMaxPagesCap|ClearsCursorWhenCapEqualsFinalPage|ClearsSelfReferentialCursorOnMaxPagesCap)$")
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "^TestSyncResource(WarnsOnFullPageWithoutCursor|DoesNotWarnOnExplicitFinalFullPage|PreservesCursorOnMaxPagesCap|ClearsCursorWhenCapEqualsFinalPage|ClearsSelfReferentialCursorOnMaxPagesCap)$")
 
 	// Build the generated CLI to catch template-syntax / import errors that
 	// substring assertions miss.
@@ -11921,6 +12383,273 @@ func TestGraphQLSyncResourceClearsSelfReferentialCursorOnMaxPagesCap(t *testing.
 	runGoCommand(t, outputDir, "build", "./...")
 }
 
+func TestGeneratedGraphQLLatestOnlyChoosesNewestPage(t *testing.T) {
+	t.Parallel()
+
+	const sdl = `
+type Query {
+  issues(first: Int, after: String, last: Int, before: String, query: String): IssueConnection
+}
+
+type IssueConnection {
+  nodes: [Issue]
+  pageInfo: PageInfo
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+
+type Issue {
+  id: ID!
+  title: String!
+  createdAt: String
+}
+`
+
+	gqlSpec, err := graphql.ParseSDLBytes("latest-choice.graphql", []byte(sdl))
+	require.NoError(t, err)
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(gqlSpec.Name))
+	gen := New(gqlSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	queriesGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "client", "queries.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(queriesGo), "pageInfo { hasNextPage endCursor }")
+	require.NotContains(t, string(queriesGo), "ListLatestQuery = `query($last: Int!, $query")
+
+	behaviorTest := `package cli
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"reflect"
+	"testing"
+	"time"
+
+	"` + naming.CLI(gqlSpec.Name) + `/internal/client"
+	"` + naming.CLI(gqlSpec.Name) + `/internal/config"
+	"` + naming.CLI(gqlSpec.Name) + `/internal/store"
+)
+
+type gqlLatestChoiceHandler struct {
+	forward              []map[string]any
+	backward             []map[string]any
+	after                []map[string]any
+	omitBackwardPageInfo bool
+	calls                []string
+}
+
+func (h *gqlLatestChoiceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Variables map[string]any ` + "`json:\"variables\"`" + `
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	nodes := h.forward
+	hasNextPage := true
+	endCursor := "forward-end"
+	includePageInfo := true
+	if _, ok := req.Variables["last"]; ok {
+		h.calls = append(h.calls, "last")
+		nodes = h.backward
+		endCursor = "latest-end"
+		includePageInfo = !h.omitBackwardPageInfo
+	} else if _, ok := req.Variables["after"]; ok {
+		h.calls = append(h.calls, "after")
+		nodes = h.after
+		hasNextPage = false
+		endCursor = ""
+	} else {
+		h.calls = append(h.calls, "first")
+	}
+
+	conn := map[string]any{
+		"nodes": nodes,
+	}
+	if includePageInfo {
+		conn["pageInfo"] = map[string]any{
+			"hasNextPage": hasNextPage,
+			"endCursor":   endCursor,
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data": map[string]any{
+			"issues": conn,
+		},
+	})
+}
+
+func runGraphQLLatestOnlyChoice(t *testing.T, forward, backward []map[string]any) (*gqlLatestChoiceHandler, *store.Store) {
+	t.Helper()
+	return runGraphQLLatestOnlyChoiceWithMaxPages(t, forward, backward, nil, 1, []string{"first", "last"})
+}
+
+func runGraphQLLatestOnlyChoiceWithMaxPages(t *testing.T, forward, backward, after []map[string]any, maxPages int, wantCalls []string) (*gqlLatestChoiceHandler, *store.Store) {
+	t.Helper()
+	handler := &gqlLatestChoiceHandler{forward: forward, backward: backward, after: after}
+	return runGraphQLLatestOnlyChoiceWithHandler(t, handler, maxPages, wantCalls)
+}
+
+func runGraphQLLatestOnlyChoiceWithHandler(t *testing.T, handler *gqlLatestChoiceHandler, maxPages int, wantCalls []string) (*gqlLatestChoiceHandler, *store.Store) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	c := client.New(&config.Config{BaseURL: server.URL}, time.Second, 0)
+	res := syncResource(context.Background(), c, db, "issues", "", false, maxPages, true)
+	if res.Err != nil {
+		t.Fatalf("syncResource error: %v", res.Err)
+	}
+	if !reflect.DeepEqual(handler.calls, wantCalls) {
+		t.Fatalf("query calls = %#v, want %#v", handler.calls, wantCalls)
+	}
+	return handler, db
+}
+
+func assertGraphQLLatestOnlyStored(t *testing.T, db *store.Store, wantID, rejectID string) {
+	t.Helper()
+	if _, err := db.Get("issues", wantID); err != nil {
+		t.Fatalf("wanted issue %s to be stored: %v", wantID, err)
+	}
+	if _, err := db.Get("issues", rejectID); err == nil {
+		t.Fatalf("issue %s should not have been stored", rejectID)
+	} else if err != sql.ErrNoRows {
+		t.Fatalf("checking rejected issue %s: %v", rejectID, err)
+	}
+}
+
+func TestGraphQLLatestOnlyChoosesBackwardPageForOldestFirst(t *testing.T) {
+	_, db := runGraphQLLatestOnlyChoice(t,
+		[]map[string]any{
+			{"id": "old-1", "title": "oldest first", "createdAt": "2021-08-02T00:00:00Z"},
+			{"id": "old-2", "title": "oldest second", "createdAt": "2021-08-03T00:00:00Z"},
+		},
+		[]map[string]any{
+			{"id": "new-1", "title": "newest page", "createdAt": "2026-06-01T00:00:00Z"},
+			{"id": "new-2", "title": "newer page", "createdAt": "2026-06-02T00:00:00Z"},
+		},
+	)
+	assertGraphQLLatestOnlyStored(t, db, "new-1", "old-1")
+}
+
+func TestGraphQLLatestOnlyKeepsForwardPageForNewestFirst(t *testing.T) {
+	_, db := runGraphQLLatestOnlyChoice(t,
+		[]map[string]any{
+			{"id": "new-1", "title": "newest first", "createdAt": "2026-06-02T00:00:00Z"},
+			{"id": "new-2", "title": "newest second", "createdAt": "2026-06-01T00:00:00Z"},
+		},
+		[]map[string]any{
+			{"id": "old-1", "title": "oldest tail", "createdAt": "2021-08-02T00:00:00Z"},
+			{"id": "old-2", "title": "oldest tail second", "createdAt": "2021-08-03T00:00:00Z"},
+		},
+	)
+	assertGraphQLLatestOnlyStored(t, db, "new-1", "old-1")
+}
+
+func TestGraphQLLatestOnlyKeepsForwardPageWithoutTimestampEvidence(t *testing.T) {
+	_, db := runGraphQLLatestOnlyChoice(t,
+		[]map[string]any{
+			{"id": "forward-1", "title": "forward page"},
+			{"id": "forward-2", "title": "forward second"},
+		},
+		[]map[string]any{
+			{"id": "backward-1", "title": "backward page"},
+			{"id": "backward-2", "title": "backward second"},
+		},
+	)
+	assertGraphQLLatestOnlyStored(t, db, "forward-1", "backward-1")
+}
+
+func TestGraphQLLatestOnlyIgnoresDateLikeNonTimestampFields(t *testing.T) {
+	_, db := runGraphQLLatestOnlyChoice(t,
+		[]map[string]any{
+			{"id": "forward-1", "title": "newest first", "createdAt": "2026-06-02T00:00:00Z"},
+		},
+		[]map[string]any{
+			{
+				"id":         "backward-1",
+				"title":      "2027-01-01",
+				"lastUpdate": "2027-01-01T00:00:00Z",
+				"candidate":  "2027-01-02",
+				"uptime":     "2027-01-03T00:00:00Z",
+				"runtime":    "2027-01-04T00:00:00Z",
+			},
+		},
+	)
+	assertGraphQLLatestOnlyStored(t, db, "forward-1", "backward-1")
+}
+
+func TestGraphQLLatestOnlyReadsNestedTimestampFields(t *testing.T) {
+	_, db := runGraphQLLatestOnlyChoice(t,
+		[]map[string]any{
+			{"id": "old-1", "title": "oldest first", "createdAt": "2021-08-02T00:00:00Z"},
+		},
+		[]map[string]any{
+			{"id": "new-1", "title": "newest nested", "meta": map[string]any{"updatedAt": "2026-06-02T00:00:00Z"}},
+		},
+	)
+	assertGraphQLLatestOnlyStored(t, db, "new-1", "old-1")
+}
+
+func TestGraphQLLatestOnlyCanContinueAfterBackwardPageWins(t *testing.T) {
+	handler := &gqlLatestChoiceHandler{
+		forward: []map[string]any{
+			{"id": "old-1", "title": "oldest first", "createdAt": "2021-08-02T00:00:00Z"},
+		},
+		backward: []map[string]any{
+			{"id": "new-1", "title": "newest page", "createdAt": "2026-06-02T00:00:00Z"},
+		},
+		after: []map[string]any{
+			{"id": "after-1", "title": "after latest", "createdAt": "2026-06-03T00:00:00Z"},
+		},
+		omitBackwardPageInfo: true,
+	}
+	_, db := runGraphQLLatestOnlyChoiceWithHandler(t, handler, 2, []string{"first", "last", "after"})
+	assertGraphQLLatestOnlyStored(t, db, "new-1", "old-1")
+	if _, err := db.Get("issues", "after-1"); err != nil {
+		t.Fatalf("wanted issue after-1 to be stored after latest page pagination: %v", err)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "graphql_sync_latest_only_test.go"), []byte(behaviorTest), 0o644))
+	selector := "^TestGraphQLLatestOnly(ChoosesBackwardPageForOldestFirst|KeepsForwardPageForNewestFirst|KeepsForwardPageWithoutTimestampEvidence|IgnoresDateLikeNonTimestampFields|ReadsNestedTimestampFields|CanContinueAfterBackwardPageWins)$"
+	listCmd := exec.Command("go", "test", "-mod=mod", "./internal/cli", "-list", selector)
+	listCmd.Dir = outputDir
+	cacheDir, err := goBuildCacheDir(outputDir)
+	require.NoError(t, err)
+	listCmd.Env = append(os.Environ(), "GOCACHE="+cacheDir)
+	listOut, err := listCmd.CombinedOutput()
+	require.NoError(t, err, string(listOut))
+	for _, name := range []string{
+		"TestGraphQLLatestOnlyChoosesBackwardPageForOldestFirst",
+		"TestGraphQLLatestOnlyKeepsForwardPageForNewestFirst",
+		"TestGraphQLLatestOnlyKeepsForwardPageWithoutTimestampEvidence",
+		"TestGraphQLLatestOnlyIgnoresDateLikeNonTimestampFields",
+		"TestGraphQLLatestOnlyReadsNestedTimestampFields",
+		"TestGraphQLLatestOnlyCanContinueAfterBackwardPageWins",
+	} {
+		require.Contains(t, string(listOut), name)
+	}
+	runGoCommandRequired(t, outputDir, "test", "./internal/cli", "-run", selector)
+	requireGeneratedCompiles(t, outputDir)
+}
+
 func TestGeneratedGraphQLSyncConcurrencyDefaultHonorsRateClass(t *testing.T) {
 	t.Parallel()
 
@@ -11992,7 +12721,7 @@ func TestGeneratedSyncAdvancesOffsetWhenHasMoreWithoutCursor(t *testing.T) {
 		"sync loops must not require an API-returned next cursor for offset pagination")
 	assert.Contains(t, syncContent, `if !hasMore || len(items) < pageSize.limit {`,
 		"sync loops must break only on real done signals before handling cursor advancement")
-	assert.Contains(t, syncContent, `if pageSize.cursorParam == "offset" {`,
+	assert.Contains(t, syncContent, `if pageSize.cursorType == "offset" {`,
 		"offset pagination must advance the cursor client-side when has_more is true")
 	assert.Contains(t, syncContent, `nextCursor = strconv.Itoa(currentOffset + pageSize.limit)`,
 		"offset pagination must compute the next offset from the current cursor and limit")
@@ -12001,6 +12730,132 @@ func TestGeneratedSyncAdvancesOffsetWhenHasMoreWithoutCursor(t *testing.T) {
 
 	runGoCommand(t, outputDir, "mod", "tidy")
 	runGoCommand(t, outputDir, "build", "./...")
+}
+
+func TestGeneratedSyncAdvancesOffsetAfterFullPageWithoutHasMore(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "offsetnosignal",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth:    spec.AuthConfig{Type: "none"},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/offsetnosignal-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"records": {
+				Description: "Records",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:      "GET",
+						Path:        "/records",
+						Description: "List records",
+						Response:    spec.ResponseDef{Type: "array"},
+						Pagination:  &spec.Pagination{Type: "offset", CursorParam: "offset", LimitParam: "limit"},
+					},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{Store: true, Sync: true}
+	gen.profile = &profiler.APIProfile{
+		Pagination: profiler.PaginationProfile{
+			CursorParam:     "offset",
+			CursorType:      "offset",
+			PageSizeParam:   "limit",
+			DefaultPageSize: 2,
+			ItemsKey:        "items",
+		},
+		SyncableResources: []profiler.SyncableResource{
+			{Name: "records", Path: "/records", Method: "GET", SupportsPagination: true},
+		},
+	}
+	require.NoError(t, gen.Generate())
+
+	behaviorTest := `package cli
+
+import (
+	"context"
+	"encoding/json"
+	"path/filepath"
+	"testing"
+
+	"` + naming.CLI(apiSpec.Name) + `/internal/store"
+)
+
+type offsetNoSignalSyncClient struct {
+	responses []json.RawMessage
+	params    []map[string]string
+}
+
+func (c *offsetNoSignalSyncClient) Get(ctx context.Context, path string, params map[string]string) (json.RawMessage, error) {
+	_ = ctx
+	copied := map[string]string{}
+	for k, v := range params {
+		copied[k] = v
+	}
+	c.params = append(c.params, copied)
+	if len(c.responses) == 0 {
+		return json.RawMessage(` + "`" + `{"items":[]}` + "`" + `), nil
+	}
+	next := c.responses[0]
+	c.responses = c.responses[1:]
+	return next, nil
+}
+
+func (c *offsetNoSignalSyncClient) RateLimit() float64 {
+	return 0
+}
+
+func TestSyncResourceAdvancesOffsetAfterFullPageWithoutHasMore(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	client := &offsetNoSignalSyncClient{responses: []json.RawMessage{
+		json.RawMessage(` + "`" + `{"items":[{"id":"one"},{"id":"two"}]}` + "`" + `),
+		json.RawMessage(` + "`" + `{"items":[{"id":"three"}]}` + "`" + `),
+	}}
+	res := syncResource(context.Background(), client, db, "records", "", true, 0, false, nil, nil)
+	if res.Err != nil {
+		t.Fatalf("syncResource error: %v", res.Err)
+	}
+	if res.Count != 3 {
+		t.Fatalf("synced count = %d, want 3", res.Count)
+	}
+	if len(client.params) != 2 {
+		t.Fatalf("requests = %d, want 2", len(client.params))
+	}
+	if client.params[0]["limit"] != "2" {
+		t.Fatalf("first request limit = %q, want 2", client.params[0]["limit"])
+	}
+	if _, ok := client.params[0]["offset"]; ok {
+		t.Fatalf("first request should not include an offset cursor, got params=%#v", client.params[0])
+	}
+	if client.params[1]["offset"] != "2" {
+		t.Fatalf("second request offset = %q, want 2", client.params[1]["offset"])
+	}
+
+	rows, err := db.List("records", 10)
+	if err != nil {
+		t.Fatalf("list records: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("stored rows = %d, want 3", len(rows))
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "sync_offset_no_signal_test.go"), []byte(behaviorTest), 0o644))
+
+	runGoCommandRequired(t, outputDir, "mod", "tidy")
+	runGoCommandRequired(t, outputDir, "test", "-run", "^TestSyncResourceAdvancesOffsetAfterFullPageWithoutHasMore$", "./internal/cli")
 }
 
 // TestGeneratedSyncGatesSinceParamPerResource pins the fix for issue #900:
@@ -12134,7 +12989,7 @@ func TestGeneratedSyncGatesSinceParamPerResource(t *testing.T) {
 	runGoCommand(t, outputDir, "build", "./...")
 }
 
-func TestGeneratedSyncInjectsFieldSelectorDefaults(t *testing.T) {
+func TestGeneratedSyncDoesNotInjectFieldSelectorDefaults(t *testing.T) {
 	t.Parallel()
 
 	apiSpec := &spec.APISpec{
@@ -12200,29 +13055,133 @@ func TestGeneratedSyncInjectsFieldSelectorDefaults(t *testing.T) {
 	require.NoError(t, err)
 	syncContent := string(syncGo)
 
-	assert.Contains(t, syncContent, "func syncResourceFieldSelector(resource string) (string, string)",
-		"sync.go must emit per-resource field-selector defaults")
+	assert.NotContains(t, syncContent, "func syncResourceFieldSelector(resource string) (string, string)",
+		"sync.go must not emit sync-time field-selector defaults")
+	assert.NotContains(t, syncContent, "fieldSelectorKey",
+		"sync.go must not inject a generated field-selector query param during sync")
+	assert.NotContains(t, syncContent, `return "opt_fields", "gid,completed,assignee.gid,custom_fields.gid"`,
+		"sync.go must not carry record-narrowing defaults into sync")
+	assert.Contains(t, syncContent, "userParams.applyTo(resource, params, false)",
+		"syncResource must still allow explicit user-supplied sync params")
 
-	fieldSelectorStart := strings.Index(syncContent, "func syncResourceFieldSelector(resource string) (string, string)")
-	require.NotEqual(t, -1, fieldSelectorStart, "sync.go must emit syncResourceFieldSelector")
-	fieldSelectorBody := syncContent[fieldSelectorStart:]
-	if nextFunc := strings.Index(fieldSelectorBody[1:], "\nfunc "); nextFunc != -1 {
-		fieldSelectorBody = fieldSelectorBody[:nextFunc+1]
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "build", "./...")
+}
+
+func TestGeneratedSyncIgnoresCheckpointWhenStoreEmpty(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := &spec.APISpec{
+		Name:    "emptystorecheckpoint",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "Authorization",
+			Format:  "Bearer {token}",
+			EnvVars: []string{"EMPTYSTORECHECKPOINT_API_KEY"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/emptystorecheckpoint-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"events": {
+				Description: "Events",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {
+						Method:      "GET",
+						Path:        "/events",
+						Description: "List events",
+						Response:    spec.ResponseDef{Type: "array"},
+						Pagination:  &spec.Pagination{CursorParam: "after", LimitParam: "limit"},
+						Params: []spec.Param{
+							{Name: "updated_since", Type: "string"},
+						},
+					},
+				},
+			},
+		},
 	}
 
-	assert.Contains(t, fieldSelectorBody, `case "tasks":`,
-		"tasks must appear in the field-selector switch")
-	assert.Contains(t, fieldSelectorBody, `return "opt_fields", "gid,completed,assignee.gid,custom_fields.gid"`,
-		"tasks must map to the spec-declared field selector and generated default")
-	assert.NotContains(t, fieldSelectorBody, `case "users":`,
-		"resources without a field selector must not inject an opt_fields-like query param")
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{Store: true, Sync: true}
+	require.NoError(t, gen.Generate())
 
-	defaultIdx := strings.Index(syncContent, "fieldSelectorKey, fieldSelectorValue := syncResourceFieldSelector(resource)")
-	applyIdx := strings.Index(syncContent, "userParams.applyTo(resource, params, false)")
-	require.NotEqual(t, -1, defaultIdx, "syncResource must apply field-selector defaults")
-	require.NotEqual(t, -1, applyIdx, "syncResource must still apply user params")
-	assert.Less(t, defaultIdx, applyIdx,
-		"user-supplied --param/--resource-param must override field-selector defaults")
+	inlineTest := `package cli
+
+import (
+	"context"
+	"encoding/json"
+	"path/filepath"
+	"testing"
+
+	"` + naming.CLI(apiSpec.Name) + `/internal/store"
+)
+
+type checkpointClient struct {
+	params []map[string]string
+}
+
+func (c *checkpointClient) Get(ctx context.Context, path string, params map[string]string) (json.RawMessage, error) {
+	copied := map[string]string{}
+	for k, v := range params {
+		copied[k] = v
+	}
+	c.params = append(c.params, copied)
+	return json.RawMessage(` + "`" + `[{"id":"evt-1"}]` + "`" + `), nil
+}
+
+func (c *checkpointClient) RateLimit() float64 {
+	return 0
+}
+
+func TestSyncResourceIgnoresCheckpointWhenStoreEmpty(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.SaveSyncState("events", "stale-cursor", 10); err != nil {
+		t.Fatalf("seed stale sync state: %v", err)
+	}
+
+	emptyClient := &checkpointClient{}
+	res := syncResource(context.Background(), emptyClient, db, "events", "", false, 0, false, nil, nil)
+	if res.Err != nil {
+		t.Fatalf("empty-store syncResource error: %v", res.Err)
+	}
+	if got := emptyClient.params[0]["after"]; got != "" {
+		t.Fatalf("empty store sent stale cursor %q", got)
+	}
+	if got := emptyClient.params[0]["updated_since"]; got != "" {
+		t.Fatalf("empty store sent stale updated_since %q", got)
+	}
+
+	if err := db.SaveSyncState("events", "resume-cursor", 1); err != nil {
+		t.Fatalf("seed populated sync state: %v", err)
+	}
+
+	populatedClient := &checkpointClient{}
+	res = syncResource(context.Background(), populatedClient, db, "events", "", false, 0, false, nil, nil)
+	if res.Err != nil {
+		t.Fatalf("populated-store syncResource error: %v", res.Err)
+	}
+	if got := populatedClient.params[0]["after"]; got != "resume-cursor" {
+		t.Fatalf("populated store cursor = %q, want resume-cursor", got)
+	}
+	if got := populatedClient.params[0]["updated_since"]; got == "" {
+		t.Fatalf("populated store did not send updated_since checkpoint")
+	}
+}
+`
+	testPath := filepath.Join(outputDir, "internal", "cli", "sync_empty_store_checkpoint_test.go")
+	require.NoError(t, os.WriteFile(testPath, []byte(inlineTest), 0o644))
+
+	runGoCommandRequired(t, outputDir, "mod", "tidy")
+	runGoCommandRequired(t, outputDir, "test", "-run", "^TestSyncResourceIgnoresCheckpointWhenStoreEmpty$", "./internal/cli")
 }
 
 func TestGeneratedSyncGatesPaginationParamsPerResource(t *testing.T) {
@@ -13108,6 +14067,87 @@ paths:
 	assert.Contains(t, string(storeGo), `"identity_providers": "idpId",`)
 }
 
+func TestGeneratedSyncSkipsRequiredQueryDependentResources(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("required-query-dependent")
+	apiSpec.Resources = map[string]spec.Resource{
+		"widgets": {
+			Endpoints: map[string]spec.Endpoint{
+				"list": {
+					Method:     "GET",
+					Path:       "/widgets",
+					Response:   spec.ResponseDef{Type: "array", Item: "Widget"},
+					Pagination: &spec.Pagination{CursorParam: "after", LimitParam: "limit"},
+				},
+			},
+			SubResources: map[string]spec.Resource{
+				"comments": {
+					Endpoints: map[string]spec.Endpoint{
+						"list": {
+							Method:     "GET",
+							Path:       "/widgets/{widget_id}/comments",
+							Response:   spec.ResponseDef{Type: "array", Item: "Comment"},
+							Pagination: &spec.Pagination{CursorParam: "after", LimitParam: "limit"},
+						},
+					},
+				},
+				"availableSlots": {
+					Endpoints: map[string]spec.Endpoint{
+						"list": {
+							Method:   "GET",
+							Path:     "/widgets/{widget_id}/availableSlots",
+							Response: spec.ResponseDef{Type: "array", Item: "AvailableSlot"},
+							Params: []spec.Param{{
+								Name:     "size",
+								Type:     "string",
+								Required: true,
+							}},
+							Pagination: &spec.Pagination{CursorParam: "after", LimitParam: "limit"},
+						},
+					},
+				},
+				"typedViews": {
+					Endpoints: map[string]spec.Endpoint{
+						"list": {
+							Method:   "GET",
+							Path:     "/widgets/{widget_id}/typedViews",
+							Response: spec.ResponseDef{Type: "array", Item: "TypedView"},
+							Params: []spec.Param{{
+								Name:     "viewType",
+								Type:     "string",
+								Required: true,
+								Enum:     []string{"compact", "full"},
+							}},
+							Pagination: &spec.Pagination{CursorParam: "after", LimitParam: "limit"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	profile := profiler.Profile(apiSpec)
+	require.Len(t, profile.SyncableResources, 1)
+	assert.Equal(t, "widgets", profile.SyncableResources[0].Name)
+	require.Len(t, profile.DependentSyncResources, 1)
+	assert.Equal(t, "comments", profile.DependentSyncResources[0].Name)
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+	require.Len(t, gen.profile.DependentSyncResources, 1)
+	assert.Equal(t, "comments", gen.profile.DependentSyncResources[0].Name)
+
+	syncGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "sync.go"))
+	require.NoError(t, err)
+
+	assert.Contains(t, string(syncGo), `case "comments":`)
+	assert.NotContains(t, string(syncGo), "/widgets/{widget_id}/availableSlots")
+	assert.NotContains(t, string(syncGo), "/widgets/{widget_id}/typedViews")
+	requireGeneratedCompiles(t, outputDir)
+}
+
 func TestGenerateOperationRoutingPathParamDefault(t *testing.T) {
 	t.Parallel()
 
@@ -13155,7 +14195,7 @@ func TestGenerateOperationRoutingPathParamDefault(t *testing.T) {
 		cliContent,
 		"defaulted operation-routing path param should be user-overridable")
 	assert.Contains(t, cliContent,
-		`path = replacePathParam(path, "pathQueryId", fmt.Sprintf("%v", flagPathQueryId))`,
+		`path = replacePathParam(path, "pathQueryId", formatCLIParamValue(flagPathQueryId))`,
 		"generated command must substitute the path template before calling the API")
 
 	helpersGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "helpers.go"))
@@ -13375,6 +14415,7 @@ func TestGenerateGraphQLListWiresOptionalQueryVariable(t *testing.T) {
 						Params: []spec.Param{
 							{Name: "first", Type: "integer", Default: 100},
 							{Name: "after", Type: "string"},
+							{Name: "last", Type: "integer"},
 							{Name: "before", Type: "string"},
 						},
 						Pagination: &spec.Pagination{
@@ -13425,6 +14466,7 @@ func TestGenerateGraphQLListWiresOptionalQueryVariable(t *testing.T) {
 	assert.Contains(t, queriesContent, "query($first: Int!, $after: String, $query: String)")
 	assert.Contains(t, queriesContent, "orders(first: $first, after: $after, query: $query)")
 	assert.Contains(t, queriesContent, "query($first: Int!, $after: String) {\n  fulfillmentOrders(first: $first, after: $after)")
+	assert.Contains(t, queriesContent, "query($last: Int!) {\n  fulfillmentOrders(last: $last)")
 	assert.NotContains(t, queriesContent, "before: $before")
 	assert.NotContains(t, queriesContent, "fulfillmentOrders(first: $first, after: $after, query: $query)")
 	assert.Contains(t, queriesContent, "query {\n  customers {\n")
@@ -14722,7 +15764,7 @@ func TestGenerateMCPMainRemoteOptIn(t *testing.T) {
 func assertMCPMainUsesVersionVar(t *testing.T, body string) {
 	t.Helper()
 
-	assert.Contains(t, body, `var version = "1.0.0"`)
+	assert.Contains(t, body, `var version = "0.0.0-dev"`)
 	assert.Contains(t, body, "server.NewMCPServer(")
 	assert.Contains(t, body, "\n\t\tversion,\n\t\tserver.WithToolCapabilities(false),")
 	assert.NotContains(t, body, "\n\t\t\"1.0.0\",\n\t\tserver.WithToolCapabilities(false),")
@@ -14822,7 +15864,7 @@ func TestGenerateMCPCodeOrchestrationGlobalPathTemplateVars(t *testing.T) {
 	src := string(data)
 	assert.Contains(t, src, `TemplateParams []codeOrchParamBinding`)
 	assert.Contains(t, src, `TemplateParams: []codeOrchParamBinding{{PublicName: "tenant_id", WireName: "tenant_id"}}`)
-	assert.Contains(t, src, `c.Config.TemplateVars[binding.WireName] = fmt.Sprintf("%v", v)`)
+	assert.Contains(t, src, `c.Config.TemplateVars[binding.WireName] = formatMCPParamValue(v)`)
 	assert.Contains(t, src, `delete(params, binding.PublicName)`,
 		"code-orchestration execute must not also route promoted template params as query/body inputs")
 
@@ -14944,27 +15986,27 @@ func TestGenerateMCPCodeOrchestrationSkippedByDefault(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "code_orch.go must not be emitted without orchestration: code")
 }
 
-// TestGenerateMCPNewClientSkipsCache proves that newMCPClient sets
+// TestGenerateMCPNewClientUsesPoliteRateLimitAndSkipsCache proves that
+// newMCPClient keeps MCP calls on the adaptive limiter path and sets
 // c.NoCache = true. Agents calling through MCP need fresh data every call;
 // the on-disk response cache survives across MCP server invocations, so
 // without this the next GET after a DELETE/PATCH returns the pre-mutation
 // snapshot for up to the cache TTL. Interactive CLI commands construct
 // their own client and are unaffected.
-func TestGenerateMCPNewClientSkipsCache(t *testing.T) {
+func TestGenerateMCPNewClientUsesPoliteRateLimitAndSkipsCache(t *testing.T) {
 	t.Parallel()
 
 	t.Run("default spec source", func(t *testing.T) {
 		t.Parallel()
-		assertNewMCPClientSkipsCache(t, "")
+		assertNewMCPClientUsesPoliteRateLimitAndSkipsCache(t, "")
 	})
 
-	// SpecSource=sniffed takes the rate-limited branch in the template
-	// (client.New(cfg, 30*time.Second, 2) instead of ..., 0). The cache
-	// bypass must apply on both branches; this guards against a future
-	// edit moving NoCache=true inside one of the if/else arms.
+	// SpecSource=sniffed already defaulted to a paced client. Keep it on the
+	// same MCP default path as other specs so future edits cannot reintroduce
+	// an unpaced branch.
 	t.Run("sniffed spec source", func(t *testing.T) {
 		t.Parallel()
-		assertNewMCPClientSkipsCache(t, "sniffed")
+		assertNewMCPClientUsesPoliteRateLimitAndSkipsCache(t, "sniffed")
 	})
 
 	t.Run("interactive CLI client is not statically NoCache=true", func(t *testing.T) {
@@ -14984,10 +16026,10 @@ func TestGenerateMCPNewClientSkipsCache(t *testing.T) {
 	})
 }
 
-// assertNewMCPClientSkipsCache generates a CLI from loops.yaml with the
-// given SpecSource and asserts the MCP server's newMCPClient bypasses the
-// response cache.
-func assertNewMCPClientSkipsCache(t *testing.T, specSource string) {
+// assertNewMCPClientUsesPoliteRateLimitAndSkipsCache generates a CLI from
+// loops.yaml with the given SpecSource and asserts the MCP server's
+// newMCPClient is paced and bypasses the response cache.
+func assertNewMCPClientUsesPoliteRateLimitAndSkipsCache(t *testing.T, specSource string) {
 	t.Helper()
 	apiSpec, err := spec.Parse(filepath.Join("..", "..", "testdata", "loops.yaml"))
 	require.NoError(t, err)
@@ -14998,8 +16040,16 @@ func assertNewMCPClientSkipsCache(t *testing.T, specSource string) {
 
 	toolsData, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "tools.go"))
 	require.NoError(t, err)
-	assert.Contains(t, string(toolsData), "c.NoCache = true",
+	toolsBody := string(toolsData)
+	assert.Contains(t, toolsBody, "defaultMCPRateLimit = 2",
+		"newMCPClient must use a non-zero MCP rate limit so agent fan-out stays paced")
+	assert.Contains(t, toolsBody, "client.New(cfg, 60*time.Second, defaultMCPRateLimit)",
+		"newMCPClient must pass the MCP rate limit to the generated client")
+	assert.NotContains(t, toolsBody, "client.New(cfg, 60*time.Second, 0)",
+		"newMCPClient must not disable rate limiting for MCP-driven calls")
+	assert.Contains(t, toolsBody, "c.NoCache = true",
 		"newMCPClient must disable the response cache so MCP-driven reads see fresh state across mutations")
+	requireGeneratedCompiles(t, outputDir)
 }
 
 // TestGenerateWaitForJobBypassesResponseCache proves that the polling loop
@@ -15124,6 +16174,81 @@ func TestGenerateMCPHandlerPreservesQueryPositionals(t *testing.T) {
 	runGoCommand(t, outputDir, "build", "./...")
 }
 
+func TestGenerateMCPHandlerFormatsNumericPathAndQueryScalars(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("mcpnumericformat")
+	apiSpec.Resources = map[string]spec.Resource{
+		"projects": {
+			Description: "Projects",
+			Endpoints: map[string]spec.Endpoint{
+				"list": {
+					Method:      "GET",
+					Path:        "/projects/business/{businessId}/projects",
+					Description: "List projects",
+					Params: []spec.Param{
+						{Name: "businessId", Type: "number", Required: true, PathParam: true, Description: "Business ID"},
+						{Name: "page", Type: "number", Description: "Page cursor"},
+						{Name: "archived", Type: "boolean", Description: "Archived filter"},
+					},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	tools := readGeneratedFile(t, outputDir, "internal", "mcp", "tools.go")
+	assert.Contains(t, tools, "func formatMCPParamValue(v any) string",
+		"generated MCP handler must emit a scalar formatter shared by path and query binding")
+	assert.Contains(t, tools, `path = strings.Replace(path, placeholder, formatMCPParamValue(v), 1)`,
+		"path params must use scalar formatting so large JSON numbers do not render as e+ notation")
+	assert.Contains(t, tools, `params[binding.WireName] = formatMCPParamValue(v)`,
+		"query params must use scalar formatting so large JSON numbers do not render as e+ notation")
+	assert.NotContains(t, tools, `path = strings.Replace(path, placeholder, fmt.Sprintf("%v", v), 1)`)
+	assert.NotContains(t, tools, `params[binding.WireName] = fmt.Sprintf("%v", v)`)
+
+	inlineTest := `package mcp
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestFormatMCPParamValueFormatsNumbersWithoutExponent(t *testing.T) {
+	tests := []struct {
+		name  string
+		input any
+		want  string
+	}{
+		{name: "large integer float", input: float64(14229361), want: "14229361"},
+		{name: "fractional float", input: float64(1.5), want: "1.5"},
+		{name: "large float above threshold", input: float64(2e15), want: "2000000000000000"},
+		{name: "negative integer float", input: float64(-14229361), want: "-14229361"},
+		{name: "string", input: "abc123", want: "abc123"},
+		{name: "bool", input: true, want: "true"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatMCPParamValue(tt.input)
+			if got != tt.want {
+				t.Fatalf("formatMCPParamValue(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+			if strings.Contains(got, "e+") || strings.Contains(got, "E+") {
+				t.Fatalf("formatMCPParamValue(%v) used exponent notation: %q", tt.input, got)
+			}
+		})
+	}
+}
+`
+	testPath := filepath.Join(outputDir, "internal", "mcp", "scalar_string_test.go")
+	require.NoError(t, os.WriteFile(testPath, []byte(inlineTest), 0o644))
+	runGoCommandRequired(t, outputDir, "test", "./internal/mcp", "-run", "TestFormatMCPParamValueFormatsNumbersWithoutExponent")
+	requireGeneratedCompiles(t, outputDir)
+}
+
 func TestGenerateMCPToolsEmitsParamDefaultFallback(t *testing.T) {
 	t.Parallel()
 
@@ -15194,7 +16319,7 @@ func TestGeneratePublicParamNamesAcrossCLISurfaces(t *testing.T) {
 	assert.Contains(t, findSource, `StringVar(&flagS, "s", "", "Street address")`)
 	assert.Contains(t, findSource, `_ = cmd.Flags().MarkHidden("s")`)
 	assert.Contains(t, findSource, `if !(cmd.Flags().Changed("address") || cmd.Flags().Changed("s")) && !flags.dryRun`)
-	assert.Contains(t, findSource, `params["s"] = fmt.Sprintf("%v", flagS)`)
+	assert.Contains(t, findSource, `params["s"] = formatCLIParamValue(flagS)`)
 	assert.NotContains(t, findSource, `required flag "s" not set`)
 
 	createSource := readGeneratedFile(t, outputDir, "internal", "cli", "stores_create.go")
@@ -15205,7 +16330,7 @@ func TestGeneratePublicParamNamesAcrossCLISurfaces(t *testing.T) {
 	mcpSource := readGeneratedFile(t, outputDir, "internal", "mcp", "tools.go")
 	assert.Contains(t, mcpSource, `mcplib.WithString("address", mcplib.Required(), mcplib.Description("Street address"))`)
 	assert.Contains(t, mcpSource, `PublicName: "address", WireName: "s", Location: "query"`)
-	assert.Contains(t, mcpSource, `params[binding.WireName] = fmt.Sprintf("%v", v)`)
+	assert.Contains(t, mcpSource, `params[binding.WireName] = formatMCPParamValue(v)`)
 	assert.Contains(t, mcpSource, `mcplib.WithString("store-code", mcplib.Required(), mcplib.Description("Store code"))`)
 	assert.Contains(t, mcpSource, `PublicName: "store-code", WireName: "store_code", Location: "body"`)
 	assert.Contains(t, mcpSource, `bodyArgs[binding.WireName] = v`)
@@ -15915,6 +17040,15 @@ func runPMHintCommand(t *testing.T, dbPath string, args ...string) (string, stri
 
 func runPMCommand(t *testing.T, dbPath string, asJSON bool, args ...string) (string, string) {
 	t.Helper()
+	stdout, stderr, err := runPMCommandErr(t, dbPath, asJSON, args...)
+	if err != nil {
+		t.Fatalf("execute %v: %v; stderr=%s", args, err, stderr)
+	}
+	return stdout, stderr
+}
+
+func runPMCommandErr(t *testing.T, dbPath string, asJSON bool, args ...string) (string, string, error) {
+	t.Helper()
 	root := RootCmd()
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
@@ -15924,10 +17058,8 @@ func runPMCommand(t *testing.T, dbPath string, asJSON bool, args ...string) (str
 		fullArgs = append(fullArgs, "--json")
 	}
 	root.SetArgs(fullArgs)
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute %v: %v; stderr=%s", args, err, stderr.String())
-	}
-	return stdout.String(), stderr.String()
+	err := root.Execute()
+	return stdout.String(), stderr.String(), err
 }
 
 func TestPMWorkflowCommandEmitsSyncHints(t *testing.T) {
@@ -15977,8 +17109,8 @@ func TestAnalyticsCommandWritesToConfiguredOutput(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	for _, raw := range []string{
-		` + "`" + `{"id":"issue-1","status":"open"}` + "`" + `,
-		` + "`" + `{"id":"issue-2","status":"open"}` + "`" + `,
+		` + "`" + `{"id":"issue-1","status":"open","stage_id":"qualified"}` + "`" + `,
+		` + "`" + `{"id":"issue-2","status":"open","stage_id":"qualified"}` + "`" + `,
 	} {
 		var payload json.RawMessage = []byte(raw)
 		var obj map[string]any
@@ -16010,6 +17142,26 @@ func TestAnalyticsCommandWritesToConfiguredOutput(t *testing.T) {
 	for _, want := range []string{"status\tCount", "open\t2"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("analytics text group-by stdout = %q, want %q in configured output", stdout, want)
+		}
+	}
+
+	stdout, _ = runPMCommand(t, dbPath, false, "analytics", "--type", "issues", "--group-by", "stage")
+	for _, want := range []string{"stage\tCount", "qualified\t2"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("analytics friendly group-by stdout = %q, want %q in configured output", stdout, want)
+		}
+	}
+
+	stdout, stderr, err := runPMCommandErr(t, dbPath, false, "analytics", "--type", "issues", "--group-by", "bogus")
+	if err == nil {
+		t.Fatalf("analytics bogus group-by stdout = %q, stderr = %q, want error", stdout, stderr)
+	}
+	if strings.Contains(stdout, "<nil>") {
+		t.Fatalf("analytics bogus group-by stdout = %q, want no nil bucket", stdout)
+	}
+	for _, want := range []string{` + "`" + `group-by field "bogus" was not found` + "`" + `, "valid group-by fields:", "stage_id", "status", "aliases:", "stage"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("analytics bogus group-by stderr = %q, want %q", stderr, want)
 		}
 	}
 
@@ -16319,6 +17471,127 @@ func TestLiveCommandPrefersAPIOverLocalStore(t *testing.T) {
 	runGoCommandRequired(t, outputDir, "mod", "tidy")
 	runGoCommandRequired(t, outputDir, "test", "-run", "TestLiveCommandPrefersAPIOverLocalStore", "./internal/cli")
 	assert.Greater(t, requestCount.Load(), int32(0), "generated command should call the live API in auto mode")
+}
+
+func TestGeneratedLocalSearchIndexesMeaningfulContent(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := adsCampaignSpec()
+	apiSpec.Name = "localsearch"
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{Store: true, Search: true}
+	require.NoError(t, gen.Generate())
+
+	inlineTest := `package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"testing"
+
+	"localsearch-pp-cli/internal/store"
+)
+
+func TestLocalSearchIndexesMeaningfulContent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dbPath := defaultDBPath("localsearch-pp-cli")
+
+	db, err := store.OpenWithContext(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	for _, seed := range []struct {
+		resourceType string
+		id           string
+		data         json.RawMessage
+	}{
+		{"campaigns", "camp_1", json.RawMessage(` + "`" + `{"id":"camp_1","description":"Blue taxi hotel transfer","currency":"USD","cost":"120.50","created_at":"2026-06-07","account_id":"acct_1","url":"https://example.com/taxi"}` + "`" + `)},
+		{"campaigns", "camp_2", json.RawMessage(` + "`" + `{"id":"camp_2","description":"Airport rail pass","currency":"USD","account_id":"acct_1"}` + "`" + `)},
+		{"transactions", "tx_1", json.RawMessage(` + "`" + `{"id":"tx_1","description":"Taxi hotel receipt","note":"yellow cab","currency":"USD","account_id":"acct_2"}` + "`" + `)},
+		{"transactions", "tx_2", json.RawMessage(` + "`" + `{"id":"tx_2","description":"Museum pass","currency":"USD","account_id":"acct_2"}` + "`" + `)},
+	} {
+		if err := db.Upsert(seed.resourceType, seed.id, seed.data); err != nil {
+			t.Fatalf("upsert %s/%s: %v", seed.resourceType, seed.id, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	fieldNameHits := runLocalSearch(t, dbPath, "description")
+	if len(fieldNameHits) != 0 {
+		t.Fatalf("searching JSON field name returned %d hits, want 0: %#v", len(fieldNameHits), fieldNameHits)
+	}
+
+	punctuatedHits := runLocalSearch(t, dbPath, "taxi-hotel")
+	if got := ids(punctuatedHits); !sameIDs(got, []string{"camp_1", "tx_1"}) {
+		t.Fatalf("punctuated search ids = %#v, want camp_1 and tx_1", got)
+	}
+
+	transactionHits := runLocalSearch(t, dbPath, "taxi-hotel", "--type", "transactions")
+	if got := ids(transactionHits); !sameIDs(got, []string{"tx_1"}) {
+		t.Fatalf("--type transactions ids = %#v, want tx_1 only", got)
+	}
+
+	multiTermHits := runLocalSearch(t, dbPath, "taxi receipt")
+	if got := ids(multiTermHits); !sameIDs(got, []string{"tx_1"}) {
+		t.Fatalf("multi-term search ids = %#v, want tx_1 only", got)
+	}
+}
+
+func runLocalSearch(t *testing.T, dbPath, query string, extra ...string) []map[string]any {
+	t.Helper()
+	root := RootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	args := append([]string{"search", query, "--data-source", "local", "--json", "--db", dbPath}, extra...)
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute %v: %v; stderr=%s", args, err, stderr.String())
+	}
+	var payload struct {
+		Results []map[string]any ` + "`" + `json:"results"` + "`" + `
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("parse search output: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	return payload.Results
+}
+
+func ids(rows []map[string]any) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if id, ok := row["id"].(string); ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func sameIDs(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := make(map[string]int, len(got))
+	for _, id := range got {
+		seen[id]++
+	}
+	for _, id := range want {
+		seen[id]--
+		if seen[id] < 0 {
+			return false
+		}
+	}
+	return true
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "local_search_test.go"), []byte(inlineTest), 0o644))
+
+	runGoCommandRequired(t, outputDir, "mod", "tidy")
+	runGoCommandRequired(t, outputDir, "test", "-run", "TestLocalSearchIndexesMeaningfulContent", "./internal/cli")
 }
 
 // TestSearchTemplateEmptyTypeQueriesGenericFTS pins #1390 — the
@@ -16897,6 +18170,198 @@ func TestGenerateEndpointTemplateEnvOverridesWireThrough(t *testing.T) {
 	runGoCommand(t, outputDir, "build", "./...")
 }
 
+func TestGenerateSyncIncludesMultiLeafCollectionResources(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := openapi.Parse([]byte(`
+openapi: 3.0.3
+info:
+  title: Wearable Metrics
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+paths:
+  /v2/usercollection/daily_sleep:
+    get:
+      operationId: get_daily_sleep
+      parameters:
+        - name: start_date
+          in: query
+          schema: {type: string, format: date}
+        - name: next_token
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailySleepEnvelope"
+  /v2/usercollection/heartrate:
+    get:
+      operationId: get_heartrate
+      parameters:
+        - name: start_datetime
+          in: query
+          schema: {type: string, format: date-time}
+        - name: next_token
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartrateEnvelope"
+  /v2/usercollection/personal_info:
+    get:
+      operationId: get_personal_info
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PersonalInfoEnvelope"
+  /v2/webhook/subscription:
+    get:
+      operationId: list_webhook_subscriptions
+      tags: [oauth]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEnvelope"
+components:
+  schemas:
+    DailySleepEnvelope:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailySleep"
+        next_token:
+          type: string
+          nullable: true
+    HeartrateEnvelope:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Heartrate"
+        next_token:
+          type: string
+          nullable: true
+    PersonalInfoEnvelope:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/PersonalInfo"
+    WebhookEnvelope:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Webhook"
+    DailySleep:
+      type: object
+      properties:
+        id: {type: string}
+        day: {type: string, format: date}
+    Heartrate:
+      type: object
+      properties:
+        id: {type: string}
+        timestamp: {type: string, format: date-time}
+    PersonalInfo:
+      type: object
+      properties:
+        id: {type: string}
+        age: {type: integer}
+    Webhook:
+      type: object
+      properties:
+        id: {type: string}
+`))
+	require.NoError(t, err)
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	gen.VisionSet = VisionTemplateSet{Store: true, Sync: true}
+	require.NoError(t, gen.Generate())
+
+	syncSrc, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "sync.go"))
+	require.NoError(t, err)
+	src := string(syncSrc)
+
+	assert.Contains(t, src, `"/v2/usercollection/daily_sleep"`,
+		"syncResourcePath must include every data list resource under a shared collection prefix")
+	assert.Contains(t, src, `"/v2/usercollection/heartrate"`,
+		"syncResourcePath must include sibling list resources instead of collapsing to one resource")
+	assert.Contains(t, src, `"/v2/usercollection/personal_info"`,
+		"single-page data resources under the shared prefix must stay syncable")
+	assert.Contains(t, src, `"/v2/webhook/subscription"`,
+		"auth-tagged resources remain accepted when explicitly requested")
+
+	defaultResources := regexp.MustCompile(`(?s)func defaultSyncResources\(\) \[\]string \{(.*?)\n\}`).FindStringSubmatch(src)
+	require.Len(t, defaultResources, 2)
+	assert.Contains(t, defaultResources[1], `"usercollection",`)
+	assert.Contains(t, defaultResources[1], `"usercollection-daily-sleep",`)
+	assert.Contains(t, defaultResources[1], `"usercollection-personal-info",`)
+	assert.NotContains(t, defaultResources[1], `"usercollection-heartrate",`,
+		"heartrate should stay absorbed by the canonical usercollection resource")
+	assert.NotContains(t, defaultResources[1], `"webhook",`,
+		"auth-tagged webhook resources must stay out of the default sync set")
+
+	paginationSwitch := regexp.MustCompile(`(?s)func resourceSupportsPagination\(resource string\) bool \{(.*?)\n\}`).FindStringSubmatch(src)
+	require.Len(t, paginationSwitch, 2)
+	assert.Contains(t, paginationSwitch[1], `case "usercollection":`)
+	assert.Contains(t, paginationSwitch[1], `case "usercollection-daily-sleep":`)
+	assert.NotContains(t, paginationSwitch[1], `case "usercollection-personal-info":`,
+		"single-object resources without cursor params must not be marked paginated")
+	assert.Contains(t, src, `cursorParam: "next_token"`,
+		"the generated sync layer must derive the API cursor param instead of hardcoding after")
+
+	sinceFormatTest := `package cli
+
+import "testing"
+
+func TestSyncSinceParamFormatForDateOnlyResources(t *testing.T) {
+	if got := syncResourceSinceParamFormat("usercollection-daily-sleep"); got != "date" {
+		t.Fatalf("daily sleep since format = %q, want date", got)
+	}
+	// The canonical usercollection endpoint is heartrate because it has the shortest shared-prefix path.
+	if got := syncResourceSinceParamFormat("usercollection"); got != "date-time" {
+		t.Fatalf("heartrate since format = %q, want date-time", got)
+	}
+	if got := formatSyncSinceValue("2026-06-07T12:34:56Z", "date"); got != "2026-06-07" {
+		t.Fatalf("date-formatted since value = %q, want YYYY-MM-DD", got)
+	}
+	if got := formatSyncSinceValue("2026-06-07T12:34:56.789Z", "date"); got != "2026-06-07" {
+		t.Fatalf("date-formatted fractional since value = %q, want YYYY-MM-DD", got)
+	}
+	if got := formatSyncSinceValue("not-a-date-value", "date"); got != "not-a-date-value" {
+		t.Fatalf("invalid date-formatted since value = %q, want original value", got)
+	}
+	if got := formatSyncSinceValue("2026-06-07T12:34:56Z", "date-time"); got != "2026-06-07T12:34:56Z" {
+		t.Fatalf("date-time since value = %q, want original RFC3339", got)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "sync_since_format_test.go"), []byte(sinceFormatTest), 0o644))
+	runGoCommandRequired(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "^TestSyncSinceParamFormatForDateOnlyResources$")
+}
+
 func TestGenerateGlobalPathTemplateVarRootFlag(t *testing.T) {
 	t.Parallel()
 
@@ -16974,7 +18439,7 @@ func TestGenerateGlobalPathTemplateVarRootFlag(t *testing.T) {
 		"MCP endpoint tools must expose a per-call override matching the CLI root flag")
 	assert.Contains(t, mcpSrc, `Location: "template"`,
 		"MCP handler binding must route tenant_id into Config.TemplateVars instead of query params")
-	assert.Contains(t, mcpSrc, `c.Config.TemplateVars[binding.WireName] = fmt.Sprintf("%v", v)`,
+	assert.Contains(t, mcpSrc, `c.Config.TemplateVars[binding.WireName] = formatMCPParamValue(v)`,
 		"MCP handler must merge global template inputs into Config.TemplateVars before the request")
 	contactsGetTool := generatedMCPToolBlock(t, mcpSrc, "contacts_get")
 	assert.NotContains(t, contactsGetTool, `"tenant_id"`,
