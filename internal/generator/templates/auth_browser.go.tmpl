@@ -1036,7 +1036,7 @@ func newAuthRefreshQueriesCmd(flags *rootFlags) *cobra.Command {
 
 func persistedQueryRegistryPath(outputPath string) (string, error) {
 	if strings.TrimSpace(outputPath) != "" {
-		clean, ok := cleanOutputPath(outputPath)
+		clean, ok := cliutil.CleanPathOverride(outputPath)
 		if !ok {
 			return "", fmt.Errorf("invalid --output path %q: must be absolute", outputPath)
 		}
@@ -1047,27 +1047,6 @@ func persistedQueryRegistryPath(outputPath string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "persisted-queries.json"), nil
-}
-
-func cleanOutputPath(raw string) (string, bool) {
-	path := strings.TrimSpace(raw)
-	if path == "~" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		path = home
-	} else if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
-	}
-	if !filepath.IsAbs(path) {
-		return "", false
-	}
-	return filepath.Clean(path), true
 }
 
 func capturePersistedQueries(capture browserCaptureHandle, duration time.Duration) ([]persistedQueryCapture, error) {

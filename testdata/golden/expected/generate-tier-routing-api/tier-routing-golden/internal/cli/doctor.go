@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -547,8 +546,9 @@ func legacyCredentialProbePaths(cfg *config.Config) []string {
 		paths = append(paths, path)
 	}
 	if cfg != nil && cfg.Path != "" {
+		// Probe only the active config; a same-dir standard-named file may
+		// belong to an unrelated CLI sharing that directory.
 		add(cfg.Path)
-		add(filepath.Join(filepath.Dir(cfg.Path), "config.json"))
 	}
 	if legacyPath, err := config.LegacyConfigPath(); err == nil {
 		add(legacyPath)

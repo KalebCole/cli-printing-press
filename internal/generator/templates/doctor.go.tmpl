@@ -31,7 +31,7 @@ import (
 {{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}
 	"os/exec"
 {{- end}}
-{{- if or .Auth.RequiresBrowserSession .HasAuthCommand}}
+{{- if .Auth.RequiresBrowserSession}}
 	"path/filepath"
 {{- end}}
 {{- if .BearerRefresh.Enabled}}
@@ -1054,8 +1054,9 @@ func legacyCredentialProbePaths(cfg *config.Config) []string {
 		paths = append(paths, path)
 	}
 	if cfg != nil && cfg.Path != "" {
+		// Probe only the active config; a same-dir standard-named file may
+		// belong to an unrelated CLI sharing that directory.
 		add(cfg.Path)
-		add(filepath.Join(filepath.Dir(cfg.Path), "config.{{or .Config.Format "json"}}"))
 	}
 	if legacyPath, err := config.LegacyConfigPath(); err == nil {
 		add(legacyPath)

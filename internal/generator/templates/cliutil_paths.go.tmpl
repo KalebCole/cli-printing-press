@@ -24,10 +24,14 @@ const (
 	PathKindCache
 )
 
+// pathHomeOverride holds the --home flag value. SetHomeOverride writes
+// it once at command init; the MCP server's request handlers resolve
+// paths concurrently through ResolveKindDir, so access is guarded.
 var (
-	pathHomeOverride string
-	pathWarnedMu     sync.Mutex
-	pathWarned       = map[string]struct{}{}
+	pathHomeOverrideMu sync.RWMutex
+	pathHomeOverride   string
+	pathWarnedMu       sync.Mutex
+	pathWarned         = map[string]struct{}{}
 )
 
 type PathResolution struct {
@@ -45,13 +49,11 @@ type PathIgnoredOverride struct {
 }
 
 func SetHomeOverride(path string) (func(), error) {
-	previous := pathHomeOverride
 	path = strings.TrimSpace(path)
 	if path == "" {
-		pathHomeOverride = ""
-		return func() { pathHomeOverride = previous }, nil
+		return setHomeOverride(""), nil
 	}
-	clean, ok := cleanPathOverride(path)
+	clean, ok := CleanPathOverride(path)
 	if !ok {
 		return nil, fmt.Errorf("invalid --home %q: path must be absolute", path)
 	}
@@ -62,12 +64,31 @@ func SetHomeOverride(path string) (func(), error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("checking --home %q: %w", clean, err)
 	}
-	pathHomeOverride = clean
-	return func() { pathHomeOverride = previous }, nil
+	return setHomeOverride(clean), nil
+}
+
+// setHomeOverride swaps in value under lock and returns a restore
+// function that reinstates the prior value (also under lock).
+func setHomeOverride(value string) func() {
+	pathHomeOverrideMu.Lock()
+	previous := pathHomeOverride
+	pathHomeOverride = value
+	pathHomeOverrideMu.Unlock()
+	return func() {
+		pathHomeOverrideMu.Lock()
+		pathHomeOverride = previous
+		pathHomeOverrideMu.Unlock()
+	}
+}
+
+func homeOverride() string {
+	pathHomeOverrideMu.RLock()
+	defer pathHomeOverrideMu.RUnlock()
+	return pathHomeOverride
 }
 
 func HomeOverrideActive() bool {
-	return pathHomeOverride != ""
+	return homeOverride() != ""
 }
 
 func ConfigDir() (string, error) {
@@ -147,8 +168,8 @@ func ResolveKindDir(kind PathKind) (PathResolution, error) {
 	} else if skipped != nil {
 		ignored = append(ignored, *skipped)
 	}
-	if pathHomeOverride != "" {
-		return pathResolution(kind, filepath.Join(pathHomeOverride, kindName(kind)), "--home", "--home", ignored), nil
+	if override := homeOverride(); override != "" {
+		return pathResolution(kind, filepath.Join(override, kindName(kind)), "--home", "--home", ignored), nil
 	}
 	if home, ok, skipped := envDir(envPrefix + "_HOME"); ok {
 		return pathResolution(kind, filepath.Join(home, kindName(kind)), "home-env", envPrefix+"_HOME", ignored), nil
@@ -245,7 +266,7 @@ func envDir(name string) (string, bool, *PathIgnoredOverride) {
 	if raw == "" {
 		return "", false, nil
 	}
-	clean, ok := cleanPathOverride(raw)
+	clean, ok := CleanPathOverride(raw)
 	if !ok {
 		warnSkippedPathOverride(name, raw)
 		return "", false, &PathIgnoredOverride{Name: name, Value: raw}
@@ -253,7 +274,9 @@ func envDir(name string) (string, bool, *PathIgnoredOverride) {
 	return clean, true, nil
 }
 
-func cleanPathOverride(raw string) (string, bool) {
+// CleanPathOverride trims, tilde-expands, and validates raw as an
+// absolute path, returning the cleaned path and whether it is usable.
+func CleanPathOverride(raw string) (string, bool) {
 	expanded := expandTilde(strings.TrimSpace(raw))
 	if expanded == "" || !filepath.IsAbs(expanded) {
 		return "", false
