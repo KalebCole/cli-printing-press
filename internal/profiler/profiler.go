@@ -42,6 +42,8 @@ type PaginationProfile struct {
 	PageSizeParam   string `json:"page_size_param"`   // most common page size param (limit, per_page, page_size, first)
 	SinceParam      string `json:"since_param"`       // temporal filter param (since, updated_after, modified_since)
 	DateRangeParam  string `json:"date_range_param"`  // date-range filter param (dates, date_range, dateRange)
+	ODataConditions bool   `json:"odata_conditions"`  // API uses OData-style conditions=field > [timestamp] filtering
+	ODATimestampField string `json:"odata_timestamp_field"` // field name for timestamp in OData conditions (e.g., lastUpdated)
 	ItemsKey        string `json:"items_key"`         // response array key (data, results, items, or "" for root array)
 	DefaultPageSize int    `json:"default_page_size"` // detected or default 100
 }
@@ -386,6 +388,11 @@ func Profile(s *spec.APISpec) *APIProfile {
 				if name == "dates" || name == "date_range" || name == "daterange" {
 					dateRangeParams[param.Name]++
 				}
+				// Detect OData-style conditions param (e.g., conditions=lastUpdated > [timestamp])
+				if name == "conditions" && !p.Pagination.ODataConditions {
+					p.Pagination.ODataConditions = true
+					p.Pagination.ODATimestampField = "lastUpdated"
+				}
 			}
 
 			if len(endpoint.Body) > 10 {
@@ -457,13 +464,19 @@ func Profile(s *spec.APISpec) *APIProfile {
 
 	p.Domain = detectDomainSignals(s)
 
+	// Preserve OData detection before constructing the final profile
+	odataConditions := p.Pagination.ODataConditions
+	odataTimestampField := p.Pagination.ODATimestampField
+
 	p.Pagination = PaginationProfile{
-		CursorParam:     mostCommon(cursorParams, "after"),
-		PageSizeParam:   mostCommon(pageSizeParams, "limit"),
-		SinceParam:      mostCommon(sinceParams, ""),
-		DateRangeParam:  mostCommon(dateRangeParams, ""),
-		ItemsKey:        mostCommon(responsePaths, ""),
-		DefaultPageSize: 100,
+		CursorParam:      mostCommon(cursorParams, "after"),
+		PageSizeParam:    mostCommon(pageSizeParams, "limit"),
+		SinceParam:       mostCommon(sinceParams, ""),
+		DateRangeParam:   mostCommon(dateRangeParams, ""),
+		ItemsKey:         mostCommon(responsePaths, ""),
+		DefaultPageSize:  100,
+		ODataConditions:  odataConditions,
+		ODATimestampField: odataTimestampField,
 	}
 
 	return p

@@ -1289,3 +1289,36 @@ func TestProfileSyncableResourceShorterPathWinsMetadata(t *testing.T) {
 	assert.Equal(t, "winner", profile.SyncableResources[0].IDField)
 	assert.True(t, profile.SyncableResources[0].Critical)
 }
+
+func TestProfileODATAConditionsDetection(t *testing.T) {
+	// OData-style APIs use 'conditions' param with expressions like: conditions=lastUpdated > [timestamp]
+	// The profiler should detect this pattern and set Pagination.ODataConditions to true
+	s := &spec.APISpec{
+		Name: "connectwise-manage",
+		Resources: map[string]spec.Resource{
+			"ticket": {
+				Endpoints: map[string]spec.Endpoint{
+					"list_tickets": {  // Use descriptive name with 'list' in it
+						Method:   "GET",
+						Path:     "/v4/Company/Ticket",
+						Params: []spec.Param{
+							{Name: "conditions", Type: "string"},
+							{Name: "page", Type: "integer"},
+							{Name: "pageSize", Type: "integer"},
+						},
+						Response: spec.ResponseDef{Type: "array"},  // Ensure array response
+						Body:     []spec.Param{},
+					},
+				},
+			},
+		},
+	}
+
+	profile := Profile(s)
+	t.Logf("ODataConditions: %v, ODATimestampField: '%s', SinceParam: '%s'", 
+		profile.Pagination.ODataConditions, profile.Pagination.ODATimestampField, profile.Pagination.SinceParam)
+	assert.True(t, profile.Pagination.ODataConditions, "should detect 'conditions' param as OData-style filtering")
+	assert.Equal(t, "lastUpdated", profile.Pagination.ODATimestampField, "default timestamp field should be lastUpdated")
+	// SinceParam should NOT be set for OData APIs (they use conditions param instead)
+	assert.Empty(t, profile.Pagination.SinceParam, "OData APIs use conditions param, not simple since param")
+}

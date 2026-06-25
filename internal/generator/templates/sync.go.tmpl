@@ -293,7 +293,15 @@ Exit codes & warnings:
 
 	cmd.Flags().StringSliceVar(&resources, "resources", nil, "Comma-separated resource types to sync")
 	cmd.Flags().BoolVar(&full, "full", false, "Full resync (ignore previous checkpoint)")
+{{- if .Pagination.ODataConditions}}
+	// OData APIs use conditions param; --since flag has no effect for incremental sync
+	cmd.Flags().StringVar(&since, "since", "", "[not supported] This API uses OData-style condition filtering")
+{{- else if or .Pagination.SinceParam .Pagination.DateRangeParam}}
 	cmd.Flags().StringVar(&since, "since", "", "Incremental sync duration (e.g. 7d, 24h, 1w, 30m)")
+{{- else}}
+	// API has no temporal filter params; --since flag will be ignored
+	cmd.Flags().StringVar(&since, "since", "", "[not supported] This API does not support incremental sync")
+{{- end}}
 	cmd.Flags().IntVar(&concurrency, "concurrency", 4, "Number of parallel sync workers")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Database path (default: ~/.local/share/{{.Name}}-pp-cli/data.db)")
 	cmd.Flags().IntVar(&maxPages, "max-pages", 100, "Maximum pages to fetch per resource (0 = unlimited; cap-hit emits a sync_warning event)")
@@ -330,6 +338,10 @@ func syncResource(c interface {
 	// Determine the since param value:
 	// 1. Explicit --since flag takes priority
 	// 2. Otherwise use last_synced_at from sync_state for incremental sync
+{{- if .Pagination.ODataConditions}}
+	// Note: OData APIs use 'conditions' parameter with expressions like "lastUpdated > [timestamp]"
+	// The --since flag is not supported; this code path will not be reached unless manually modified.
+{{- end}}
 	sinceParam := determineSinceParam()
 	effectiveSince := sinceTS
 	if effectiveSince == "" && !lastSynced.IsZero() && !full {
@@ -366,14 +378,25 @@ func syncResource(c interface {
 		}
 
 		// Set since filter
+{{- if .Pagination.ODataConditions}}
+		if effectiveSince != "" {
+			conditions := generateODataConditions("{{.Pagination.ODATimestampField}}", effectiveSince)
+			if conditions != "" {
+				params["conditions"] = conditions
+			}
+		}
+{{- else if .Pagination.DateRangeParam}}
 		if effectiveSince != "" {
 			params[sinceParam] = effectiveSince
 		}
-{{- if .Pagination.DateRangeParam}}
 
 		// Set date range filter (pass-through to API)
 		if dates != "" {
 			params[determineDateRangeParam()] = dates
+		}
+{{- else}}
+		if effectiveSince != "" {
+			params[sinceParam] = effectiveSince
 		}
 {{- end}}
 
@@ -559,9 +582,28 @@ func determinePaginationDefaults() paginationDefaults {
 }
 
 // determineSinceParam returns the query parameter name for incremental sync filtering.
+// Returns empty string for OData-style APIs (they use conditions param instead).
 func determineSinceParam() string {
-	return "{{if .Pagination.SinceParam}}{{.Pagination.SinceParam}}{{else}}since{{end}}"
+{{- if .Pagination.ODataConditions}}
+	return "" // OData APIs use conditions param, not simple since param
+{{- else if .Pagination.SinceParam}}
+	return "{{.Pagination.SinceParam}}"
+{{- else}}
+	return "since"
+{{- end}}
 }
+
+{{- if .Pagination.ODataConditions}}
+// generateODataConditions creates an OData-style filter expression for incremental sync.
+// Format: conditions=timestampField > [RFC3339]
+func generateODataConditions(timestampField, sinceValue string) string {
+	if timestampField == "" || sinceValue == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s > [%s]", timestampField, sinceValue)
+}
+{{- end}}
+
 {{- if .Pagination.DateRangeParam}}
 
 // determineDateRangeParam returns the query parameter name for date-range sync filtering.
