@@ -679,9 +679,17 @@ func syncResource(ctx context.Context, c interface {
 		}
 
 		// Set since filter
+{{- if .Pagination.ODataConditions}}
+		if effectiveSince != "" {
+			// OData API: use conditions param with timestamp expression instead of since param
+			odataCond := generateODataCondition(effectiveSince)
+			params["conditions"] = odataCond
+		}
+{{- else}}
 		if effectiveSince != "" {
 			params[sinceParam] = effectiveSince
 		}
+{{- end}}
 {{- if .Pagination.DateRangeParam}}
 
 		// Set date range filter (pass-through to API)
@@ -1407,6 +1415,27 @@ func syncResourceSinceParamFormat(resource string) string {
 	return ""
 }
 
+{{- if .Pagination.ODataConditions}}
+// syncResourceUseOData returns true if a resource uses OData conditions instead of since param.
+func syncResourceUsesOData(resource string) bool {
+	switch resource {
+{{- range .SyncableResources}}
+{{- if .ODataConditions}}
+	case "{{.Name}}":
+		return true
+{{- end}}
+{{- end}}
+{{- range .DependentSyncResources}}
+{{- if .ODataConditions}}
+	case "{{.Name}}":
+		return true
+{{- end}}
+{{- end}}
+	}
+	return false
+}
+{{- end}}
+
 func formatSyncSinceValue(value string, paramFormat string) string {
 	if strings.EqualFold(paramFormat, "date") {
 		if ts, err := time.Parse(time.RFC3339, value); err == nil {
@@ -1421,6 +1450,23 @@ func formatSyncSinceValue(value string, paramFormat string) string {
 	}
 	return value
 }
+{{- if .Pagination.ODataConditions}}
+
+// determineODataTimestampField returns the timestamp field name for OData condition expressions.
+func determineODataTimestampField() string {
+	return "{{.Pagination.ODATimestampField}}"
+}
+
+// generateODataCondition returns an OData filter expression like "lastUpdated > 2024-01-01T00:00:00Z".
+func generateODataCondition(timestamp string) string {
+	field := determineODataTimestampField()
+	if timestamp == "" {
+		return fmt.Sprintf("%s gt datetime'%s'", field, timestamp)
+	}
+	return fmt.Sprintf("%s gt %s", field, timestamp)
+}
+{{- end}}
+
 {{- if .Pagination.DateRangeParam}}
 
 // determineDateRangeParam returns the query parameter name for date-range sync filtering.

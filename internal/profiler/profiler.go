@@ -47,6 +47,8 @@ type PaginationProfile struct {
 	PageSizeParam   string `json:"page_size_param"`   // most common page size param (limit, per_page, page_size, first)
 	SinceParam      string `json:"since_param"`       // temporal filter param (since, updated_after, modified_since)
 	DateRangeParam  string `json:"date_range_param"`  // date-range filter param (dates, date_range, dateRange)
+	ODataConditions bool   `json:"odata_conditions"`  // true if API uses OData-style conditions=field > [timestamp] filtering
+	ODATimestampField string `json:"odata_timestamp_field"` // default timestamp field for OData expressions (e.g., lastUpdated, updatedAt)
 	ItemsKey        string `json:"items_key"`         // response array key (data, results, items, or "" for root array)
 	DefaultPageSize int    `json:"default_page_size"` // detected or default 100
 }
@@ -128,6 +130,16 @@ type SyncableResource struct {
 	// timestamps to date-only endpoints.
 	SinceParamFormat string
 
+	// ODataConditions is true when this resource's list endpoint declares
+	// a "conditions" parameter for OData-style filtering (e.g.,
+	// conditions=lastUpdated > [timestamp]). When true, the sync template
+	// generates OData filter expressions instead of sending a since param.
+	ODataConditions bool
+	// ODATimestampField is the timestamp field name used in OData condition
+	// expressions (e.g., lastUpdated, updatedAt). Only set when ODataConditions
+	// is true.
+	ODATimestampField string
+
 	// SupportsPagination is true when the chosen list endpoint declares a
 	// cursor or page-size parameter. The sync template uses this to avoid
 	// sending synthetic limit/offset params to strict non-paginated list
@@ -195,8 +207,10 @@ type DependentResource struct {
 	// SinceParam mirrors SyncableResource.SinceParam for child paths so
 	// the same per-resource temporal-filter gating applies to dependent
 	// syncs.
-	SinceParam       string
-	SinceParamFormat string
+	SinceParam         string
+	SinceParamFormat   string
+	ODataConditions    bool
+	ODATimestampField  string
 
 	// SupportsPagination mirrors SyncableResource.SupportsPagination for child
 	// paths so dependent syncs skip synthetic limit/offset params on endpoints
@@ -316,6 +330,7 @@ func Profile(s *spec.APISpec) *APIProfile {
 	pageSizeParams := make(map[string]int)
 	sinceParams := make(map[string]int)
 	dateRangeParams := make(map[string]int)
+	oDataConditionsParamFound := false
 	responsePaths := make(map[string]int)
 
 	var walk func(name string, r spec.Resource, inheritedTier string, parentName string)
@@ -544,6 +559,10 @@ func Profile(s *spec.APISpec) *APIProfile {
 				if name == "dates" || name == "date_range" || name == "daterange" {
 					dateRangeParams[param.Name]++
 				}
+				// Detect OData-style conditions param (e.g., conditions=lastUpdated > [timestamp])
+				if name == "conditions" && !oDataConditionsParamFound {
+					oDataConditionsParamFound = true
+				}
 			}
 
 			if len(endpoint.Body) > 10 {
@@ -619,11 +638,18 @@ func Profile(s *spec.APISpec) *APIProfile {
 	p.Domain = detectDomainSignals(s)
 
 	p.Pagination = PaginationProfile{
-		CursorParam:     mostCommon(cursorParams, "after"),
-		CursorType:      mostCommon(cursorTypes, ""),
-		PageSizeParam:   mostCommon(pageSizeParams, "limit"),
-		SinceParam:      mostCommon(sinceParams, ""),
-		DateRangeParam:  mostCommon(dateRangeParams, ""),
+		CursorParam:       mostCommon(cursorParams, "after"),
+		CursorType:        mostCommon(cursorTypes, ""),
+		PageSizeParam:     mostCommon(pageSizeParams, "limit"),
+		SinceParam:        mostCommon(sinceParams, ""),
+		DateRangeParam:    mostCommon(dateRangeParams, ""),
+		ODataConditions:   oDataConditionsParamFound,
+		ODATimestampField: func() string {
+			if oDataConditionsParamFound {
+				return "lastUpdated"
+			}
+			return ""
+		}(),
 		ItemsKey:        mostCommon(responsePaths, ""),
 		DefaultPageSize: 100,
 	}
@@ -1398,6 +1424,8 @@ func dependentResourceFromEntry(entry parameterizedEntry, knownParents map[strin
 		Critical:           entry.meta.Critical,
 		SinceParam:         entry.meta.SinceParam,
 		SinceParamFormat:   entry.meta.SinceParamFormat,
+		ODataConditions:    entry.meta.ODataConditions,
+		ODATimestampField:  entry.meta.ODATimestampField,
 		SupportsPagination: entry.meta.SupportsPagination,
 		UsesHTMLResponse:   entry.meta.UsesHTMLResponse,
 		HTMLExtract:        entry.meta.HTMLExtract,
@@ -1865,6 +1893,8 @@ type syncableMeta struct {
 	Critical           bool
 	SinceParam         string
 	SinceParamFormat   string
+	ODataConditions    bool
+	ODATimestampField  string
 	SupportsPagination bool
 	UsesHTMLResponse   bool
 	HTMLExtract        *spec.HTMLExtract
@@ -1898,6 +1928,17 @@ type parameterizedEntry struct {
 // fields propagate uniformly.
 func metaFromEndpoint(s *spec.APISpec, resourceName string, resource spec.Resource, e spec.Endpoint, types map[string]spec.TypeDef, resourceNameIndex map[string]string) syncableMeta {
 	idWalkFilterParam, idWalkLimitParam, idWalkPageSize := detectIDWalkParams(e)
+	
+	// Detect OData conditions param
+	oDataConditions, odataTimestampField := false, ""
+	for _, param := range e.Params {
+		if strings.ToLower(param.Name) == "conditions" {
+			oDataConditions = true
+			odataTimestampField = "lastUpdated"
+			break
+		}
+	}
+	
 	return syncableMeta{
 		Path:               e.Path,
 		Method:             strings.ToUpper(e.Method),
@@ -1907,6 +1948,8 @@ func metaFromEndpoint(s *spec.APISpec, resourceName string, resource spec.Resour
 		Critical:           e.Critical,
 		SinceParam:         detectEndpointSinceParam(e.Params),
 		SinceParamFormat:   detectEndpointSinceParamFormat(e.Params),
+		ODataConditions:    oDataConditions,
+		ODATimestampField:  odataTimestampField,
 		SupportsPagination: endpointSupportsPagination(e),
 		UsesHTMLResponse:   e.UsesHTMLResponse(),
 		HTMLExtract:        e.HTMLExtract,
@@ -2462,6 +2505,8 @@ func sortedSyncableResources(m map[string]syncableMeta) []SyncableResource {
 			Critical:           meta.Critical,
 			SinceParam:         meta.SinceParam,
 			SinceParamFormat:   meta.SinceParamFormat,
+			ODataConditions:    meta.ODataConditions,
+			ODATimestampField:  meta.ODATimestampField,
 			SupportsPagination: meta.SupportsPagination,
 			UsesHTMLResponse:   meta.UsesHTMLResponse,
 			HTMLExtract:        meta.HTMLExtract,
