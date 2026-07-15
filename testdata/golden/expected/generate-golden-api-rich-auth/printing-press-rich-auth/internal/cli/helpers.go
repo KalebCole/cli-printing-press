@@ -575,6 +575,8 @@ func paginatedGet(ctx context.Context, c interface {
 
 	// Fetch all pages
 	allItems := make([]json.RawMessage, 0)
+	var collectionEnvelope map[string]json.RawMessage
+	collectionField := ""
 	seenCursorTokens := map[string]struct{}{}
 	if sentCursor := clean[cursorParam]; sentCursor != "" {
 		seenCursorTokens[sentCursor] = struct{}{}
@@ -611,7 +613,22 @@ func paginatedGet(ctx context.Context, c interface {
 			var obj map[string]json.RawMessage
 			if json.Unmarshal(data, &obj) == nil {
 				itemCount := 0
-				if nested, ok := extractPaginatedItems(obj); ok {
+				if field, nested, ok := extractPaginatedItems(obj); ok {
+					preserveEnvelope := field != ""
+					switch field {
+					case "data", "items", "results", "messages", "members", "values":
+						preserveEnvelope = false
+					}
+					if preserveEnvelope && collectionField == "" {
+						collectionField = field
+						collectionEnvelope = make(map[string]json.RawMessage, len(obj))
+						for key, value := range obj {
+							collectionEnvelope[key] = append(json.RawMessage(nil), value...)
+						}
+					}
+					if collectionField != "" && field != collectionField {
+						return nil, fmt.Errorf("paginated response collection changed from %q to %q", collectionField, field)
+					}
 					allItems = append(allItems, nested...)
 					itemCount = len(nested)
 				}
@@ -690,10 +707,44 @@ func paginatedGet(ctx context.Context, c interface {
 	} else {
 		fmt.Fprintf(os.Stderr, `{"event":"complete","total":%d,"pages":%d}`+"\n", len(allItems), page)
 	}
-	result, _ := json.Marshal(allItems)
+	var result []byte
+	if collectionField != "" {
+		collectionEnvelope[collectionField], _ = json.Marshal(allItems)
+		var deletePath func(map[string]json.RawMessage, string)
+		deletePath = func(obj map[string]json.RawMessage, path string) {
+			if path == "" {
+				return
+			}
+			parts := strings.Split(path, ".")
+			key := ""
+			for candidate := range obj {
+				if strings.EqualFold(candidate, parts[0]) {
+					key = candidate
+					break
+				}
+			}
+			if key == "" {
+				return
+			}
+			if len(parts) == 1 {
+				delete(obj, key)
+				return
+			}
+			var child map[string]json.RawMessage
+			if json.Unmarshal(obj[key], &child) != nil {
+				return
+			}
+			deletePath(child, strings.Join(parts[1:], "."))
+			obj[key], _ = json.Marshal(child)
+		}
+		deletePath(collectionEnvelope, cursorLookupPath)
+		deletePath(collectionEnvelope, hasMoreField)
+		result, _ = json.Marshal(collectionEnvelope)
+	} else {
+		result, _ = json.Marshal(allItems)
+	}
 	return json.RawMessage(result), nil
 }
-
 func nextFullPageOffsetCursor(params map[string]string, cursorParam, paginationType string, pageSize, itemCount int) (string, bool) {
 	if (paginationType != "offset" && paginationType != "page") || itemCount == 0 {
 		return "", false
@@ -821,31 +872,38 @@ func paginationCursorToken(raw json.RawMessage) string {
 	return ""
 }
 
-func extractPaginatedItems(obj map[string]json.RawMessage) ([]json.RawMessage, bool) {
+func extractPaginatedItems(obj map[string]json.RawMessage) (string, []json.RawMessage, bool) {
 	for _, field := range []string{"data", "items", "results", "messages", "members", "values"} {
 		if arr, ok := obj[field]; ok {
 			var nested []json.RawMessage
 			if json.Unmarshal(arr, &nested) == nil {
-				return nested, true
+				return field, nested, true
 			}
 		}
 	}
 
 	var onlyArray []json.RawMessage
+	onlyField := ""
 	arrayCount := 0
 	for key, raw := range obj {
 		if envelopeMetadataArrayKeys[key] {
 			continue
 		}
-		if candidate, ok := extractPaginatedObjectArray(raw); ok {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			continue
+		}
+		var candidate []json.RawMessage
+		if json.Unmarshal(raw, &candidate) == nil {
 			onlyArray = candidate
+			onlyField = key
 			arrayCount++
 		}
 	}
 	if arrayCount == 1 {
-		return onlyArray, true
+		return onlyField, onlyArray, true
 	}
-	return nil, false
+	return "", nil, false
 }
 
 // envelopeMetadataArrayKeys lists sidecar arrays that must not be mistaken for
@@ -853,20 +911,6 @@ func extractPaginatedItems(obj map[string]json.RawMessage) ([]json.RawMessage, b
 var envelopeMetadataArrayKeys = map[string]bool{
 	"errors": true, "Errors": true,
 	"warnings": true, "Warnings": true,
-}
-
-func extractPaginatedObjectArray(raw json.RawMessage) ([]json.RawMessage, bool) {
-	var items []json.RawMessage
-	// Empty fallback arrays are deliberately ignored: without an object item,
-	// there is no signal distinguishing a domain collection from metadata.
-	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
-		return nil, false
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(items[0], &obj); err != nil {
-		return nil, false
-	}
-	return items, true
 }
 
 func rawAtPath(obj map[string]json.RawMessage, path string) (json.RawMessage, bool) {
