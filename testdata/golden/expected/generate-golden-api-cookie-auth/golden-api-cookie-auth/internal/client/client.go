@@ -248,11 +248,14 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 		cacheDir = filepath.Join(dir, "http")
 	}
 	cookieJar := LoadCookieJar()
+	if cfg != nil && !cfg.UsePersistedCookieJar() {
+		cookieJar = NewCookieJar()
+	}
 	// Seed the jar from a session captured via the env var or stored in
 	// credentials but not yet in cookies.json, so the credential rides every
 	// request and net/http absorbs Set-Cookie rotation across the session.
 	if cfg != nil {
-		if cfg.CredentialDomain != "" {
+		if cfg.CredentialDomain != "" && cfg.UsePersistedCookieJar() {
 			seedBaseURL := "https://" + strings.TrimPrefix(cfg.CredentialDomain, ".")
 			SeedCookieJarForDomain(cookieJar, seedBaseURL, cfg.CookieCredential(), cfg.CredentialDomain)
 		} else {
@@ -282,6 +285,13 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 			// would then classify as a successful response and hand the HTML
 			// "Moved Permanently" body back to the caller.
 			return errors.New("stopped after 10 redirects")
+		}
+		// Never carry credential material across a host-changing redirect.
+		// Go strips Authorization and Cookie in common cases, but custom
+		// headers and URL query values need explicit removal here.
+		if req.URL.Host != via[0].URL.Host {
+			req.Header.Del("Cookie")
+			req.Header.Del("Cookie")
 		}
 		// Cookie-auth redirects: Go's http.Client + http.CookieJar handle
 		// cookie carriage on 3xx hops natively. Setting the Cookie header
@@ -1262,7 +1272,10 @@ func authPlaceholderCredentialErrorWithSetup(cfg *config.Config, setup string) e
 // registrable domain. An empty binding preserves legacy credentials and
 // explicit verify-live HTTP uses mock hosts that cannot match the real site.
 func (c *Client) credentialAppliesToURL(rawURL string) bool {
-	if c == nil || c.Config == nil || strings.TrimSpace(c.Config.CredentialDomain) == "" || cliutil.IsVerifyLiveHTTPEnv() {
+	if c == nil || c.Config == nil || !c.Config.UsePersistedCookieJar() || strings.TrimSpace(c.Config.CredentialDomain) == "" {
+		return true
+	}
+	if cliutil.IsVerifyEnv() && cliutil.IsVerifyLiveHTTPEnv() && isVerifyMockURL(rawURL) {
 		return true
 	}
 	target, err := url.Parse(rawURL)
@@ -1277,6 +1290,19 @@ func (c *Client) credentialAppliesToURL(rawURL string) bool {
 	targetRegistered, targetErr := publicsuffix.EffectiveTLDPlusOne(targetHost)
 	boundRegistered, boundErr := publicsuffix.EffectiveTLDPlusOne(boundHost)
 	return targetErr == nil && boundErr == nil && targetRegistered == boundRegistered
+}
+
+func isVerifyMockURL(rawURL string) bool {
+	target, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(target.Hostname())
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // binaryResponseEnvelope wraps a non-textual success body so it survives the

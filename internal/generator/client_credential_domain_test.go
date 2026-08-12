@@ -23,6 +23,10 @@ func TestGeneratedBrowserCredentialBindsToCapturedDomain(t *testing.T) {
 		CookieDomain: ".auth.example.com",
 		Cookies:      []string{"session_id"},
 		EnvVars:      []string{"CREDENTIALDOMAIN_SESSION"},
+		AdditionalHeaders: []spec.AdditionalAuthHeader{
+			{Header: "X-Extra", In: "header", EnvVar: spec.AuthEnvVar{Name: "CREDENTIALDOMAIN_EXTRA"}},
+			{Header: "extra_query", In: "query", EnvVar: spec.AuthEnvVar{Name: "CREDENTIALDOMAIN_QUERY"}},
+		},
 	}
 
 	outputDir := filepath.Join(t.TempDir(), "credentialdomain-pp-cli")
@@ -31,6 +35,7 @@ func TestGeneratedBrowserCredentialBindsToCapturedDomain(t *testing.T) {
 
 	clientSrc := readGeneratedFile(t, outputDir, "internal", "client", "client.go")
 	configSrc := readGeneratedFile(t, outputDir, "internal", "config", "config.go")
+	credentialsSrc := readGeneratedFile(t, outputDir, "internal", "cliutil", "credentials.go")
 	authSrc := readGeneratedFile(t, outputDir, "internal", "cli", "auth.go")
 	goMod := readGeneratedFile(t, outputDir, "go.mod")
 
@@ -40,6 +45,12 @@ func TestGeneratedBrowserCredentialBindsToCapturedDomain(t *testing.T) {
 		"browser-session config must serialize the captured credential domain")
 	assert.Contains(t, configSrc, "CredentialDomain: c.CredentialDomain",
 		"persisted config must carry the captured credential domain")
+	assert.Contains(t, configSrc, "CredentialDomain = \"\"",
+		"environment auth overrides must clear a stale browser binding")
+	assert.Contains(t, configSrc, "UsePersistedCookieJar",
+		"cookie clients must be able to suppress stale persisted browser cookies")
+	assert.Contains(t, credentialsSrc, "credential_domain",
+		"external credentials must carry the browser binding with the credential")
 	assert.Contains(t, authSrc, `cfg.CredentialDomain = ".auth.example.com"`,
 		"browser login and refresh must bind the stored credential to the capture domain")
 	assert.Contains(t, clientSrc, `seedBaseURL := "https://" + strings.TrimPrefix(cfg.CredentialDomain, ".")`,
@@ -63,9 +74,16 @@ func TestGeneratedBrowserCredentialBindsToCapturedDomain(t *testing.T) {
 	bearerDir := filepath.Join(t.TempDir(), "credentialdomain-bearer-pp-cli")
 	require.NoError(t, New(bearer, bearerDir).Generate())
 	bearerClient := readGeneratedFile(t, bearerDir, "internal", "client", "client.go")
+	bearerConfig := readGeneratedFile(t, bearerDir, "internal", "config", "config.go")
+	bearerAuth := readGeneratedFile(t, bearerDir, "internal", "cli", "auth.go")
 	bearerMod := readGeneratedFile(t, bearerDir, "go.mod")
+	requireGeneratedCompiles(t, bearerDir)
 	assert.NotContains(t, bearerClient, "credentialAppliesToURL",
 		"ordinary token auth must not emit browser credential binding")
+	assert.NotContains(t, bearerConfig, "CredentialDomain",
+		"ordinary token auth config must not emit browser credential binding")
+	assert.NotContains(t, bearerAuth, "CredentialDomain",
+		"ordinary token auth commands must not reference browser credential binding")
 	assert.NotContains(t, bearerMod, "golang.org/x/net v0.55.0",
 		"ordinary token auth must not gain the browser-only dependency")
 	assert.Equal(t, 1, strings.Count(authSrc, `cfg.CredentialDomain = ".auth.example.com"`),
@@ -74,7 +92,10 @@ func TestGeneratedBrowserCredentialBindsToCapturedDomain(t *testing.T) {
 	runtimeTest := `package client
 
 import (
+	"net/http"
+	"net/url"
 	"testing"
+	"time"
 
 	"credentialdomain-pp-cli/internal/config"
 )
@@ -96,9 +117,66 @@ func TestCredentialAppliesToURL(t *testing.T) {
 			}
 		})
 	}
+	t.Setenv("PRINTING_PRESS_VERIFY", "1")
 	t.Setenv("PRINTING_PRESS_VERIFY_LIVE_HTTP", "1")
-	if !c.credentialAppliesToURL("https://api.credential-free.example/items") {
-		t.Fatal("verify-live HTTP must preserve mock-host credential behavior")
+	if !c.credentialAppliesToURL("http://127.0.0.1:12345/items") {
+		t.Fatal("verified live HTTP must preserve mock-host credential behavior")
+	}
+	if c.credentialAppliesToURL("https://api.credential-free.example/items") {
+		t.Fatal("verify-live HTTP must not bypass matching for real targets")
+	}
+}
+
+func TestCredentialRedirectStripsCrossHostCredentials(t *testing.T) {
+	cfg := &config.Config{
+		BaseURL:          "https://api.auth.example.com",
+		AuthHeaderVal:    "Bearer primary",
+		AccessToken:      "session_id=browser",
+		CredentialDomain: ".auth.example.com",
+	}
+	c := New(cfg, time.Second, 0)
+	viaURL, _ := url.Parse("https://api.auth.example.com/start")
+	targetURL, _ := url.Parse("https://evil.example.net/done?extra_query=secret&keep=1")
+	via := &http.Request{URL: viaURL}
+	req := &http.Request{URL: targetURL, Header: http.Header{
+		"Authorization": {"Bearer primary"},
+		"X-Extra":       {"additional"},
+		"Cookie":        {"session_id=browser"},
+	}}
+	if err := c.HTTPClient.CheckRedirect(req, []*http.Request{via}); err != nil {
+		t.Fatalf("CheckRedirect returned error: %v", err)
+	}
+	for _, name := range []string{"Authorization", "X-Extra", "Cookie"} {
+		if got := req.Header.Get(name); got != "" {
+			t.Fatalf("cross-host redirect retained %s=%q", name, got)
+		}
+	}
+	if got := req.URL.Query().Get("extra_query"); got != "" {
+		t.Fatalf("cross-host redirect retained additional query credential %q", got)
+	}
+}
+
+func TestCookieOverrideDoesNotInheritPersistedBrowserJar(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := WriteCookieJarFromMap(".auth.example.com", map[string]string{"session_id": "browser"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		BaseURL:          "https://api.auth.example.com",
+		AccessToken:      "session_id=env",
+		AuthSource:       "env:CREDENTIALDOMAIN_SESSION",
+		CredentialSource: "env:CREDENTIALDOMAIN_SESSION",
+		CredentialDomain: ".auth.example.com",
+	}
+	client := New(cfg, time.Second, 0)
+	target, _ := url.Parse("https://api.auth.example.com/items")
+	cookies := client.HTTPClient.Jar.Cookies(target)
+	if len(cookies) != 1 || cookies[0].Value != "env" {
+		t.Fatalf("env cookie override inherited a persisted browser jar: %v", cookies)
+	}
+	cfg.AuthSource = "env:CREDENTIALDOMAIN_SESSION"
+	if !client.credentialAppliesToURL("https://api.credential-free.example/items") {
+		t.Fatal("environment override inherited a stale browser domain binding")
 	}
 }
 `

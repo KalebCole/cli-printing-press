@@ -1405,6 +1405,7 @@ func TestGenerateComposedApiKeyPlusBearerEmitsAdditionalHeader(t *testing.T) {
 	mcpSrc := string(mcpBytes)
 	assert.Contains(t, mcpSrc, `"ST_APP_KEY"`,
 		"MCP context must expose sibling apiKey credentials to agents")
+	requireGeneratedCompiles(t, outputDir)
 }
 
 func TestGenerateComposedHeaderApiKeyDerivesMissingSiblingEnvVar(t *testing.T) {

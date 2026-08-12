@@ -110,6 +110,10 @@ func TestSeedCookieJarForDomainAttachesSubdomainCookies(t *testing.T) {
 	if cs := jar.Cookies(u); len(cs) != 1 || cs[0].Name != "session_id" || cs[0].Value != "abc" {
 		t.Fatalf("domain-scoped seed did not attach to API subdomain: %v", cs)
 	}
+	u, _ = url.Parse("https://api.other.example/items")
+	if cs := jar.Cookies(u); len(cs) != 0 {
+		t.Fatalf("domain-scoped seed leaked outside its binding: %v", cs)
+	}
 }
 
 func TestSeedCookieJarIgnoresBareToken(t *testing.T) {
@@ -203,13 +207,34 @@ func TestWriteCookieJarReplacesWWWShadow(t *testing.T) {
 		t.Fatalf("shadowing www cookie was not replaced: %#v", after)
 	}
 }
+
+func TestClearCookieJarRemovesPersistedCredentials(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := WriteCookieJarFromMap(".cookieseed.example", map[string]string{"session_id": "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearCookieJar(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cookieJarPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []persistedCookie
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("ClearCookieJar left persisted credentials: %#v", rows)
+	}
+}
 `
 	require.NoError(t, os.WriteFile(
 		filepath.Join(outputDir, "internal", "client", "seed_runtime_test.go"),
 		[]byte(runtimeTest), 0o600))
 
 	runGoCommand(t, outputDir, "mod", "tidy")
-	runGoCommand(t, outputDir, "test", "./internal/client/", "-run", "TestSeedCookieJar|TestLooksLikeCookieJar")
+	runGoCommand(t, outputDir, "test", "./internal/client/", "-run", "TestSeedCookieJar|TestLooksLikeCookieJar|TestClearCookieJar")
 }
 
 // TestBearerAuthClientOmitsCookieJarSeed pins the negative: bearer/api_key auth

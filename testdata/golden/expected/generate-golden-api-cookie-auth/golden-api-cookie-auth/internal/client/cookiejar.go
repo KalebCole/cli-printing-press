@@ -40,11 +40,22 @@ type persistedCookie struct {
 // LoadCookieJar returns a persistent cookie jar pre-populated from the canonical
 // cookie file on disk. Falls back to an empty in-memory jar when no file exists.
 func LoadCookieJar() http.CookieJar {
-	inner, _ := cookiejar.New(nil)
-	path := cookieJarPath()
-	jar := &cookieJar{inner: inner, path: path}
+	jar := newCookieJar()
 	jar.loadFromDisk()
 	return jar
+}
+
+// NewCookieJar returns an empty persistent wrapper without loading cookies
+// from disk. Config.Load uses it when an env or external-store override has
+// replaced a browser session, so an old browser jar cannot ride along.
+func NewCookieJar() http.CookieJar {
+	return newCookieJar()
+}
+
+func newCookieJar() *cookieJar {
+	inner, _ := cookiejar.New(nil)
+	path := cookieJarPath()
+	return &cookieJar{inner: inner, path: path}
 }
 
 func cookieJarPath() string {
@@ -63,7 +74,14 @@ func ClearCookieJar() error {
 	if path == "" {
 		return nil
 	}
-	return mergeAndWriteCookieRows(path, nil)
+	data, err := json.Marshal([]persistedCookie{})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // looksLikeCookieJar reports whether s is a cookie-jar string ("name=value;
