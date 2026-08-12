@@ -31,6 +31,7 @@ func TestCookieAuthClientSeedsJar(t *testing.T) {
 
 	outputDir := filepath.Join(t.TempDir(), "cookieseed-pp-cli")
 	require.NoError(t, New(apiSpec, outputDir).Generate())
+	requireGeneratedCompiles(t, outputDir)
 
 	clientSrc := readGeneratedFile(t, outputDir, "internal", "client", "client.go")
 	configSrc := readGeneratedFile(t, outputDir, "internal", "config", "config.go")
@@ -39,7 +40,9 @@ func TestCookieAuthClientSeedsJar(t *testing.T) {
 	assert.Contains(t, clientSrc, "cookieJar := LoadCookieJar()",
 		"cookie-auth New() must build the persistent jar")
 	assert.Contains(t, clientSrc, "SeedCookieJar(cookieJar, cfg.BaseURL, cfg.CookieCredential())",
-		"cookie-auth New() must seed the jar from the stored cookie credential")
+		"cookie-auth New() must seed legacy credentials at the configured base URL")
+	assert.Contains(t, clientSrc, "SeedCookieJarForDomain(cookieJar, seedBaseURL, cfg.CookieCredential(), cfg.CredentialDomain)",
+		"cookie-auth New() must seed the jar from the stored cookie credential at its bound domain")
 	assert.Contains(t, clientSrc, "httpClient := newHTTPClient(timeout, cookieJar)",
 		"cookie-auth client must use the seeded jar, not a nil jar")
 	assert.NotContains(t, clientSrc, "newHTTPClient(timeout, nil)",
@@ -97,6 +100,15 @@ func TestSeedCookieJarAttachesStoredCookies(t *testing.T) {
 	}
 	if got["session_id"] != "abc" || got["csrf_token"] != "def" {
 		t.Fatalf("seeded jar did not attach stored cookies for the base URL: %v", got)
+	}
+}
+
+func TestSeedCookieJarForDomainAttachesSubdomainCookies(t *testing.T) {
+	jar, _ := cookiejar.New(nil)
+	SeedCookieJarForDomain(jar, "https://auth.example.com", "session_id=abc", ".auth.example.com")
+	u, _ := url.Parse("https://api.auth.example.com/items")
+	if cs := jar.Cookies(u); len(cs) != 1 || cs[0].Name != "session_id" || cs[0].Value != "abc" {
+		t.Fatalf("domain-scoped seed did not attach to API subdomain: %v", cs)
 	}
 }
 

@@ -55,6 +55,17 @@ func cookieJarPath() string {
 	return filepath.Join(dir, "cookies.json")
 }
 
+// ClearCookieJar removes the persisted session cookies for this printed CLI.
+// Logout must clear both config credentials and the jar because net/http can
+// otherwise continue sending a valid cookie after the config is cleared.
+func ClearCookieJar() error {
+	path := cookieJarPath()
+	if path == "" {
+		return nil
+	}
+	return mergeAndWriteCookieRows(path, nil)
+}
+
 // looksLikeCookieJar reports whether s is a cookie-jar string ("name=value;
 // name=value") rather than a bare token. The session env var and the browser
 // AccessToken both store the full Cookie header, so the seed is gated on a real
@@ -126,6 +137,17 @@ func parseCookieJar(s string) []*http.Cookie {
 // A no-op when the credential is empty, is not a cookie-jar string, or baseURL
 // does not parse.
 func SeedCookieJar(jar http.CookieJar, baseURL, cookieStr string) {
+	seedCookieJar(jar, baseURL, cookieStr, "")
+}
+
+// SeedCookieJarForDomain seeds a captured cookie session for the captured
+// domain and its subdomains, while still requiring callers to choose the
+// capture root explicitly.
+func SeedCookieJarForDomain(jar http.CookieJar, baseURL, cookieStr, domain string) {
+	seedCookieJar(jar, baseURL, cookieStr, strings.TrimPrefix(strings.TrimSpace(domain), "."))
+}
+
+func seedCookieJar(jar http.CookieJar, baseURL, cookieStr, cookieDomain string) {
 	if jar == nil || !looksLikeCookieJar(cookieStr) {
 		return
 	}
@@ -136,6 +158,11 @@ func SeedCookieJar(jar http.CookieJar, baseURL, cookieStr string) {
 	cookies := parseCookieJar(cookieStr)
 	if len(cookies) == 0 {
 		return
+	}
+	if cookieDomain != "" {
+		for _, cookie := range cookies {
+			cookie.Domain = cookieDomain
+		}
 	}
 	// Seed the in-memory jar only — never persist. The wrapper's SetCookies
 	// writes through to cookies.json (persistLocked -> mergeAndWriteCookieRows),

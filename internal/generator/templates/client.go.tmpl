@@ -34,6 +34,9 @@ import (
 {{- if eq .Auth.Subtype "google_service_account"}}
 	"golang.org/x/oauth2/google"
 {{- end}}
+{{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}
+	"golang.org/x/net/publicsuffix"
+{{- end}}
 {{- if .UsesBrowserHTTPTransport}}
 	enetxhttp "github.com/enetx/http"
 	"github.com/enetx/surf"
@@ -619,7 +622,12 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 	// credentials but not yet in cookies.json, so the credential rides every
 	// request and net/http absorbs Set-Cookie rotation across the session.
 	if cfg != nil {
-		SeedCookieJar(cookieJar, cfg.BaseURL, cfg.CookieCredential())
+		if cfg.CredentialDomain != "" {
+			seedBaseURL := "https://" + strings.TrimPrefix(cfg.CredentialDomain, ".")
+			SeedCookieJarForDomain(cookieJar, seedBaseURL, cfg.CookieCredential(), cfg.CredentialDomain)
+		} else {
+			SeedCookieJar(cookieJar, cfg.BaseURL, cfg.CookieCredential())
+		}
 	}
 {{- end}}
 	httpClient := newHTTPClient(timeout, cookieJar{{if .UsesBrowserHTTPTransport}}, cfg.SkipTLSVerify{{end}})
@@ -724,12 +732,17 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 		// cookie carriage on 3xx hops natively. Setting the Cookie header
 		// manually here would double the jar's cookies on the redirected
 		// request.
+{{- if and .Auth.Header (ne .Auth.Header "Cookie")}}
+		if req.URL.Host != via[0].URL.Host {
+			req.Header.Del("{{.Auth.Header}}")
+		}
+{{- end}}
 {{- else}}
 		// Same-host gate mirrors Go's shouldCopyHeaderOnRedirect: a
 		// cross-domain 3xx (open redirect or partner handoff) must not
 		// receive the auth credential, even though we are inside
 		// CheckRedirect where Go's automatic stripping has already run.
-		if req.URL.Host == via[0].URL.Host {
+		if req.URL.Host == via[0].URL.Host{{- if eq .Auth.Type "composed"}} && c.credentialAppliesToURL(req.URL.String()){{- end}} {
 			if h, err := c.authHeader(req.Context()); err == nil && h != "" {
 				req.Header.Set("{{if .Auth.Header}}{{.Auth.Header}}{{else}}Authorization{{end}}", h)
 			}
@@ -738,6 +751,17 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 			// Cookie) but not custom ones, so a custom API-key header would be
 			// forwarded verbatim to the redirect target. Delete it explicitly.
 			req.Header.Del("{{if .Auth.Header}}{{.Auth.Header}}{{else}}Authorization{{end}}")
+{{- if eq .Auth.Type "composed"}}
+{{- range .Auth.AdditionalHeaders}}
+{{- if eq .In "header"}}
+			req.Header.Del("{{.Header}}")
+{{- else if eq .In "query"}}
+			q := req.URL.Query()
+			q.Del("{{.Header}}")
+			req.URL.RawQuery = q.Encode()
+{{- end}}
+{{- end}}
+{{- end}}
 		}
 {{- end}}
 		return nil
@@ -1774,6 +1798,12 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 	if err != nil {
 		return nil, 0, err
 	}
+{{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}
+	credentialAllowed := c.credentialAppliesToURL(targetURL)
+	if !credentialAllowed {
+		authHeader = ""
+	}
+{{- end}}
 {{- if eq .Auth.Type "session_handshake"}}
 	// For session-handshake auth, authHeader() only returns the cached token
 	// (or empty). On the live path, ensure a fresh token if none is cached.
@@ -1893,7 +1923,7 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 		}
 {{- end}}
 
-		if authHeader != "" {
+		if authHeader != ""{{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}} && credentialAllowed{{- end}} {
 {{- if .HasTierRouting}}
 			if authInfo.In == "query" {
 				q := req.URL.Query()
@@ -1943,7 +1973,7 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 		// Composed-scheme per-call credentials carried by sibling apiKey schemes.
 		// Sent independently of authHeader: the API requires both the primary
 		// auth credential and each sibling credential on every request.
-		if c.Config != nil {
+		if {{if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}credentialAllowed && {{end}}c.Config != nil {
 {{- range .Auth.AdditionalHeaders}}
 			if v := c.Config.{{resolveEnvVarField .EnvVar.Name}}; v != "" {
 				if authHeaderLooksLikePlaceholderCredential(v) {
@@ -2922,6 +2952,29 @@ func (c *Client) refreshAccessToken(ctx context.Context) error {
 // path; the relative-path concat with c.BaseURL must be skipped for those calls.
 func isAbsoluteURL(path string) bool {
 	return strings.HasPrefix(path, "https://") || strings.HasPrefix(path, "http://")
+}
+
+{{end -}}
+{{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed")}}
+// credentialAppliesToURL keeps a browser-captured credential on its own
+// registrable domain. An empty binding preserves legacy credentials and
+// explicit verify-live HTTP uses mock hosts that cannot match the real site.
+func (c *Client) credentialAppliesToURL(rawURL string) bool {
+	if c == nil || c.Config == nil || strings.TrimSpace(c.Config.CredentialDomain) == "" || cliutil.IsVerifyLiveHTTPEnv() {
+		return true
+	}
+	target, err := url.Parse(rawURL)
+	if err != nil || target.Hostname() == "" {
+		return false
+	}
+	targetHost := strings.ToLower(strings.TrimSuffix(target.Hostname(), "."))
+	boundHost := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(c.Config.CredentialDomain), "."), "."))
+	if targetHost == boundHost || strings.HasSuffix(targetHost, "."+boundHost) {
+		return true
+	}
+	targetRegistered, targetErr := publicsuffix.EffectiveTLDPlusOne(targetHost)
+	boundRegistered, boundErr := publicsuffix.EffectiveTLDPlusOne(boundHost)
+	return targetErr == nil && boundErr == nil && targetRegistered == boundRegistered
 }
 
 {{end -}}
