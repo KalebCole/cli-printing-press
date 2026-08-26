@@ -6,15 +6,17 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/mvanhorn/cli-printing-press/v4/internal/generator"
+	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestScanClientEnvReads(t *testing.T) {
-	t.Run("returns nil when internal/client dir missing", func(t *testing.T) {
+	t.Run("returns empty when client and config dirs missing", func(t *testing.T) {
 		got, err := scanClientEnvReads(t.TempDir())
 		require.NoError(t, err)
-		assert.Nil(t, got)
+		assert.Empty(t, got)
 	})
 
 	t.Run("returns sorted dedup set of os.Getenv args", func(t *testing.T) {
@@ -118,6 +120,46 @@ func read() string { return os.Getenv("PICK_ME") }
 		got, err := scanClientEnvReads(dir)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"PICK_ME"}, got)
+	})
+
+	t.Run("includes os.Getenv reads from internal/config", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	if v := os.Getenv("HUDU_BASE_URL"); v != "" {
+		_ = v
+	}
+	_ = os.Getenv("HUDU_API_KEY")
+	_ = os.Getenv("HUDU_CONFIG")
+	_ = os.Getenv("PRINTING_PRESS_VERIFY")
+}
+`)
+		got, err := scanClientEnvReads(dir)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"HUDU_API_KEY", "HUDU_BASE_URL"}, got,
+			"config-package BASE_URL must be declared; config-file path and harness flags must not")
+	})
+
+	t.Run("unions client and config env reads", func(t *testing.T) {
+		dir := t.TempDir()
+		writeClientFile(t, dir, "client.go", `package client
+
+import "os"
+
+func refresh() string { return os.Getenv("HUDU_REFRESH_SECRET") }
+`)
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() string { return os.Getenv("HUDU_BASE_URL") }
+`)
+		got, err := scanClientEnvReads(dir)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"HUDU_BASE_URL", "HUDU_REFRESH_SECRET"}, got)
 	})
 }
 
@@ -320,6 +362,99 @@ func read() string { return os.Getenv("ESPN_USER_AGENT") }
 		assert.NotContains(t, entry.Description, "credential refresh")
 	})
 
+	t.Run("adds optional non-sensitive user_config for config-package BASE_URL", func(t *testing.T) {
+		dir := t.TempDir()
+		cli := CLIManifest{
+			APIName:     "hudu",
+			DisplayName: "Hudu",
+			MCPBinary:   "hudu-pp-mcp",
+			AuthType:    "api_key",
+			AuthEnvVars: []string{"HUDU_API_KEY"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "hudu-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{"HUDU_API_KEY": "${user_config.hudu_api_key}"}},
+			},
+			UserConfig: map[string]MCPBVar{
+				"hudu_api_key": {Type: "string", Title: "HUDU_API_KEY", Required: true, Sensitive: true},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("HUDU_API_KEY")
+	if v := os.Getenv("HUDU_BASE_URL"); v != "" {
+		_ = v
+	}
+	_ = os.Getenv("HUDU_CONFIG")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.hudu_api_key}", got.Server.MCPConfig.Env["HUDU_API_KEY"])
+		assert.Equal(t, "${user_config.hudu_base_url}", got.Server.MCPConfig.Env["HUDU_BASE_URL"])
+		_, hasConfig := got.Server.MCPConfig.Env["HUDU_CONFIG"]
+		assert.False(t, hasConfig, "config-file path must not become MCPB user_config")
+
+		entry, ok := got.UserConfig["hudu_base_url"]
+		require.True(t, ok)
+		assert.Equal(t, "HUDU_BASE_URL", entry.Title)
+		assert.Equal(t, "string", entry.Type)
+		assert.False(t, entry.Required)
+		assert.False(t, entry.Sensitive)
+		assert.Contains(t, entry.Description, "HUDU_BASE_URL")
+		assert.Contains(t, entry.Description, "not a credential")
+		assert.NotContains(t, entry.Description, "credential refresh")
+	})
+
+	t.Run("platform profile keeps credentials off user_config but still declares BASE_URL", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+		cli := CLIManifest{
+			APIName:     "hudu",
+			DisplayName: "Hudu",
+			MCPBinary:   "hudu-pp-mcp",
+			AuthType:    "api_key",
+			AuthEnvVars: []string{"PRINTING_PRESS_CLIENT_PROFILE"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "hudu-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{
+					"PRINTING_PRESS_CLIENT_PROFILE": "${user_config.printing_press_client_profile}",
+				}},
+			},
+			UserConfig: map[string]MCPBVar{
+				"printing_press_client_profile": {Type: "string", Title: "Client profile", Required: true},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("HUDU_API_KEY")
+	_ = os.Getenv("HUDU_BASE_URL")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.printing_press_client_profile}", got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"])
+		assert.Equal(t, "${user_config.hudu_base_url}", got.Server.MCPConfig.Env["HUDU_BASE_URL"])
+		_, hasAPIKey := got.Server.MCPConfig.Env["HUDU_API_KEY"]
+		assert.False(t, hasAPIKey, "platform-profile CLIs must not re-add credentials from config.go")
+		_, ok := got.UserConfig["hudu_base_url"]
+		assert.True(t, ok)
+	})
+
 	t.Run("manifest with nil env/userconfig maps gets populated", func(t *testing.T) {
 		dir := t.TempDir()
 		cli := CLIManifest{APIName: "x", MCPBinary: "x-pp-mcp", AuthType: "api_key"}
@@ -382,6 +517,45 @@ func refresh() (string, string) {
 		assert.True(t, entry.Required, "%s must be required when base auth requires credential", key)
 		assert.NotContains(t, entry.Description, "Optional.", "%s must not carry Optional prefix on required auth", key)
 	}
+}
+
+func TestWriteMCPBManifestFromStruct_ReconcilesConfigBaseURLWithPlatformProfile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+	writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("HUDU_API_KEY")
+	_ = os.Getenv("HUDU_BASE_URL")
+	_ = os.Getenv("HUDU_CONFIG")
+}
+`)
+
+	m := CLIManifest{
+		APIName:     "hudu",
+		DisplayName: "Hudu",
+		MCPBinary:   "hudu-pp-mcp",
+		MCPReady:    "full",
+		AuthType:    "api_key",
+		AuthEnvVars: []string{"HUDU_API_KEY"},
+	}
+
+	require.NoError(t, WriteMCPBManifestFromStruct(dir, m))
+
+	got := readMCPBManifest(t, dir)
+	assert.Equal(t, "${user_config.printing_press_client_profile}", got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"])
+	assert.Equal(t, "${user_config.hudu_base_url}", got.Server.MCPConfig.Env["HUDU_BASE_URL"])
+	_, hasAPIKey := got.Server.MCPConfig.Env["HUDU_API_KEY"]
+	assert.False(t, hasAPIKey)
+	_, hasConfig := got.Server.MCPConfig.Env["HUDU_CONFIG"]
+	assert.False(t, hasConfig)
+	entry, ok := got.UserConfig["hudu_base_url"]
+	require.True(t, ok)
+	assert.False(t, entry.Sensitive)
+	assert.False(t, entry.Required)
 }
 
 // TestWriteMCPBManifest_DiskReadVariantReconciles guards the
@@ -524,6 +698,78 @@ func writeClientFile(t *testing.T, dir, name, content string) {
 	clientDir := filepath.Join(dir, "internal", "client")
 	require.NoError(t, os.MkdirAll(clientDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(clientDir, name), []byte(content), 0o644))
+}
+
+func writeConfigFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	configDir := filepath.Join(dir, "internal", "config")
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, name), []byte(content), 0o644))
+}
+
+// TestWriteManifestForGenerate_IncludesGeneratedConfigBaseURL is the
+// generated-manifest proof: a real print's config.go always os.Getenv's
+// <API>_BASE_URL, and WriteManifestForGenerate must put that name in
+// MCPB user_config / mcp_config.env. A scanner-only fixture would not
+// catch a template/writer split that left generated config.go unread.
+func TestWriteManifestForGenerate_IncludesGeneratedConfigBaseURL(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:      "hudu",
+		Version:   "0.1.0",
+		BaseURL:   "https://example.huducloud.com/api/v1",
+		Owner:     "test-owner",
+		OwnerName: "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "x-api-key",
+			In:      "header",
+			EnvVars: []string{"HUDU_API_KEY"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/hudu-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"articles": {
+				Description: "Knowledge base articles",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/articles", Description: "List articles"},
+				},
+			},
+		},
+	}
+
+	dir := filepath.Join(t.TempDir(), "hudu-pp-cli")
+	require.NoError(t, generator.New(apiSpec, dir).Generate())
+
+	configSrc, err := os.ReadFile(filepath.Join(dir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(configSrc), `os.Getenv("HUDU_BASE_URL")`,
+		"generated config.go must remain the BASE_URL Getenv source this test is proving")
+	require.Contains(t, string(configSrc), `os.Getenv("HUDU_CONFIG")`)
+
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "hudu",
+		OutputDir: dir,
+		Spec:      apiSpec,
+	}))
+
+	got := readMCPBManifest(t, dir)
+	assert.Equal(t, "${user_config.hudu_base_url}", got.Server.MCPConfig.Env["HUDU_BASE_URL"])
+	assert.Equal(t, "${user_config.printing_press_client_profile}", got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"])
+	_, hasConfig := got.Server.MCPConfig.Env["HUDU_CONFIG"]
+	assert.False(t, hasConfig, "HUDU_CONFIG is a local file path, not an MCPB install prompt")
+	_, hasAPIKey := got.Server.MCPConfig.Env["HUDU_API_KEY"]
+	assert.False(t, hasAPIKey, "platform-profile generate must not re-add HUDU_API_KEY beside the profile selector")
+	_, hasVerify := got.Server.MCPConfig.Env["PRINTING_PRESS_VERIFY"]
+	assert.False(t, hasVerify)
+
+	entry, ok := got.UserConfig["hudu_base_url"]
+	require.True(t, ok, "generated MCPB manifest must prompt for HUDU_BASE_URL")
+	assert.Equal(t, "HUDU_BASE_URL", entry.Title)
+	assert.False(t, entry.Required)
+	assert.False(t, entry.Sensitive)
+	assert.Contains(t, entry.Description, "not a credential")
 }
 
 // Sanity check that MCPBVar json round-trips the new Sensitive+Required flags.

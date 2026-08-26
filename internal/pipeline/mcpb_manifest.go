@@ -162,15 +162,15 @@ func WriteMCPBManifestFromStruct(dir string, m CLIManifest) error {
 	if err := os.WriteFile(filepath.Join(dir, MCPBManifestFilename), out, 0o644); err != nil {
 		return err
 	}
-	if usesPlatformClientProfiles(dir) {
-		return nil
-	}
 	// Extend the just-written manifest with env vars read by
-	// internal/client/*.go that the spec-driven build didn't surface
-	// (credential-flow JWT refreshers, hand-written auth helpers, etc.).
-	// Runs from every writer call site so the bundle path reads a
-	// reconciled manifest regardless of whether it came through lock+promote
-	// or a one-off bundle build.
+	// internal/client and internal/config that the spec-driven build
+	// didn't surface (per-instance BASE_URL, credential-flow JWT
+	// refreshers, hand-written auth helpers, etc.). Runs from every
+	// writer call site so the bundle path reads a reconciled manifest
+	// regardless of whether it came through lock+promote or a one-off
+	// bundle build. Platform-profile CLIs still go through reconcile so
+	// non-secret config reads such as *_BASE_URL are declared; credential
+	// Getenv calls in config.go are not re-added (see reconciler).
 	return reconcileMCPBManifestFromClient(dir, m)
 }
 
