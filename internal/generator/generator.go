@@ -2787,6 +2787,15 @@ func (g *Generator) renderOptionalSupportFiles() error {
 		}
 	}
 
+	if g.hasOAuthTokenExchange() {
+		if err := g.renderTemplate("cliutil_oauth_token.go.tmpl", filepath.Join("internal", "cliutil", "oauth_token.go"), g.Spec); err != nil {
+			return fmt.Errorf("rendering cliutil oauth token client: %w", err)
+		}
+		if err := g.renderTemplate("cliutil_oauth_token_test.go.tmpl", filepath.Join("internal", "cliutil", "oauth_token_test.go"), g.Spec); err != nil {
+			return fmt.Errorf("rendering cliutil oauth token client test: %w", err)
+		}
+	}
+
 	if g.Spec.HasHTMLExtraction() {
 		if err := g.renderTemplate("html_extract.go.tmpl", filepath.Join("internal", "cli", "html_extract.go"), g.Spec); err != nil {
 			return fmt.Errorf("rendering HTML extraction helper: %w", err)
@@ -3455,7 +3464,7 @@ func cobratreeWalkerTemplateFiles() map[string]string {
 // reserved (agents must not hand-edit it), so unconditional regen here
 // is intentionally asymmetric vs the marker-checked tools.go/handlers.go
 // paths in mcp-sync. Spec-conditional cliutil files (freshness,
-// autoRefresh) stay in renderOptionalSupportFiles so they don't get
+// autoRefresh, oauth token client) stay in renderOptionalSupportFiles so they don't get
 // emitted when the spec opts out.
 func (g *Generator) GenerateMCPSurface() error {
 	applyLargeMCPSurfaceDefault(g.Spec, os.Stderr)
@@ -4013,6 +4022,14 @@ func (g *Generator) shouldEmitAuth() bool {
 	return g.Spec.Auth.Type != "none" ||
 		g.Spec.Auth.AuthorizationURL != "" ||
 		g.hasTrafficAnalysisHint("graphql_persisted_query")
+}
+
+func (g *Generator) hasOAuthTokenExchange() bool {
+	if g == nil || g.Spec == nil {
+		return false
+	}
+	auth := g.Spec.Auth
+	return strings.TrimSpace(auth.TokenURL) != "" || strings.TrimSpace(auth.AuthorizationURL) != ""
 }
 
 func (g *Generator) emitsTopLevelOAuthLogin() bool {
