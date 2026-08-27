@@ -67,4 +67,6 @@ For install, auth, examples, and longer product guidance, read `README.md` and `
 
 This directory is **generated output** -- a fresh print can overwrite the whole tree, so ad-hoc hand-edits don't survive on their own. If you modify the generated code, record each change under `.printing-press-patches/` (parallel to `.printing-press.json`). Regen and publish-validate read those records and fail closed when a recorded file or call site is gone, so a dropped customization cannot ship as if it were still applied.
 
+Preserved client setup belongs in a markerless file under `internal/cli/`. Register CLI-only setup with `registerClientHook`. Use `registerClientHookFor(clientHookSurfaceMCP, hook)` for MCP-only setup or `registerClientHookFor(clientHookSurfaceBoth, hook)` for shared setup. A hook runs once for each matching client. Its first error stops client construction before an API request.
+
 The entry shape, and the altitude to write it at -- a durable reprint-guard, not a changelog -- live in the public library's `AGENTS.md`, which is the single source of truth; this guide intentionally doesn't duplicate them.

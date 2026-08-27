@@ -58,7 +58,7 @@ func extractDecls(filename string) (declSet, error) {
 	for _, d := range file.Decls {
 		switch decl := d.(type) {
 		case *ast.FuncDecl:
-			if decl.Recv == nil && decl.Name.Name == "registerClientHook" {
+			if decl.Recv == nil && isGeneratedClientHookDecl(decl.Name.Name) {
 				// Client hook registration is generated scaffolding. Ignore it so
 				// a force regen can upgrade an older root while retaining a
 				// markerless package-local client extension.
@@ -69,13 +69,16 @@ func extractDecls(filename string) (declSet, error) {
 			for _, spec := range decl.Specs {
 				switch s := spec.(type) {
 				case *ast.TypeSpec:
+					if isGeneratedClientHookDecl(s.Name.Name) {
+						continue
+					}
 					decls.add(s.Name.Name)
 				case *ast.ValueSpec:
 					for _, n := range s.Names {
 						// The original singleton hook was generated scaffolding,
 						// not authored surface. Ignore it so a force regen can
 						// migrate older generated roots to the additive hook.
-						if n.Name == "novelCommands" || n.Name == "clientHooks" {
+						if n.Name == "novelCommands" || isGeneratedClientHookDecl(n.Name) {
 							continue
 						}
 						decls.add(n.Name)
@@ -85,6 +88,19 @@ func extractDecls(filename string) (declSet, error) {
 		}
 	}
 	return decls, nil
+}
+
+func isGeneratedClientHookDecl(name string) bool {
+	return name == "clientHooks" ||
+		name == "clientHookSurface" ||
+		name == "clientHookSurfaceCLI" ||
+		name == "clientHookSurfaceMCP" ||
+		name == "clientHookSurfaceBoth" ||
+		name == "clientHookRegistration" ||
+		name == "registerClientHook" ||
+		name == "registerClientHookFor" ||
+		name == "applyClientHooks" ||
+		name == "ApplyMCPClientHooks"
 }
 
 // receiverTypeName returns the canonical key for a method receiver:

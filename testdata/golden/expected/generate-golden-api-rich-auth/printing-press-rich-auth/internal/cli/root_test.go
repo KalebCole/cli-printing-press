@@ -15,7 +15,109 @@ import (
 	"printing-press-rich-pp-cli/internal/cliutil"
 
 	"github.com/spf13/cobra"
+	"printing-press-rich-pp-cli/internal/client"
 )
+
+func TestSharedClientHookRunsOnBothSurfaces(t *testing.T) {
+	resetClientHooks(t)
+
+	calls := 0
+	registerClientHookFor(clientHookSurfaceBoth, func(*client.Client) error {
+		calls++
+		return nil
+	})
+
+	if err := applyClientHooks(clientHookSurfaceCLI, &client.Client{}); err != nil {
+		t.Fatalf("applying CLI client hooks: %v", err)
+	}
+	if err := ApplyMCPClientHooks(&client.Client{}); err != nil {
+		t.Fatalf("applying MCP client hooks: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("shared client hook calls = %d, want 2", calls)
+	}
+}
+
+func TestClientHooksRespectSurfaceScope(t *testing.T) {
+	t.Run("CLI-only", func(t *testing.T) {
+		resetClientHooks(t)
+		calls := 0
+		registerClientHook(func(*client.Client) error {
+			calls++
+			return nil
+		})
+
+		if err := applyClientHooks(clientHookSurfaceCLI, &client.Client{}); err != nil {
+			t.Fatalf("applying CLI client hooks: %v", err)
+		}
+		if err := ApplyMCPClientHooks(&client.Client{}); err != nil {
+			t.Fatalf("applying MCP client hooks: %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("CLI-only client hook calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("MCP-only", func(t *testing.T) {
+		resetClientHooks(t)
+		calls := 0
+		registerClientHookFor(clientHookSurfaceMCP, func(*client.Client) error {
+			calls++
+			return nil
+		})
+
+		if err := applyClientHooks(clientHookSurfaceCLI, &client.Client{}); err != nil {
+			t.Fatalf("applying CLI client hooks: %v", err)
+		}
+		if err := ApplyMCPClientHooks(&client.Client{}); err != nil {
+			t.Fatalf("applying MCP client hooks: %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("MCP-only client hook calls = %d, want 1", calls)
+		}
+	})
+}
+
+func TestClientHooksAllowNoRegistrations(t *testing.T) {
+	resetClientHooks(t)
+
+	if err := applyClientHooks(clientHookSurfaceCLI, &client.Client{}); err != nil {
+		t.Fatalf("applying no CLI client hooks: %v", err)
+	}
+	if err := ApplyMCPClientHooks(&client.Client{}); err != nil {
+		t.Fatalf("applying no MCP client hooks: %v", err)
+	}
+}
+
+func TestClientHooksStopAtFirstFailure(t *testing.T) {
+	resetClientHooks(t)
+	wantErr := errors.New("provider setup failed")
+	laterCalls := 0
+	registerClientHookFor(clientHookSurfaceBoth, func(*client.Client) error {
+		return wantErr
+	})
+	registerClientHookFor(clientHookSurfaceBoth, func(*client.Client) error {
+		laterCalls++
+		return nil
+	})
+
+	err := ApplyMCPClientHooks(&client.Client{})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("applying MCP client hooks error = %v, want %v", err, wantErr)
+	}
+	if laterCalls != 0 {
+		t.Fatalf("hooks after failure ran %d times, want 0", laterCalls)
+	}
+}
+
+func resetClientHooks(t *testing.T) {
+	t.Helper()
+	previous := clientHooks
+	clientHooks = nil
+	t.Cleanup(func() {
+		clientHooks = previous
+	})
+}
 
 func TestDeclaredAPISurfaceReachable(t *testing.T) {
 	expected := []string{

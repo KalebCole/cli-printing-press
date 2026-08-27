@@ -94,13 +94,56 @@ func addNovelCommandIfAbsent(parent *cobra.Command, candidate *cobra.Command) {
 	parent.AddCommand(candidate)
 }
 
-// clientHooks let preserved package-local extensions configure a newly-created
-// client without editing generated code. Hooks are additive and run once per
-// client construction; they must not perform provider-specific behavior here.
-var clientHooks []func(*client.Client) error
+// Client hooks let preserved package-local extensions configure newly-created
+// clients without editing generated code. Hooks are additive and run once per
+// matching client construction.
+type clientHookSurface uint8
+
+const (
+	clientHookSurfaceCLI clientHookSurface = 1 << iota
+	clientHookSurfaceMCP
+	clientHookSurfaceBoth = clientHookSurfaceCLI | clientHookSurfaceMCP
+)
+
+type clientHookRegistration struct {
+	surface clientHookSurface
+	hook    func(*client.Client) error
+}
+
+var clientHooks []clientHookRegistration
 
 func registerClientHook(hook func(*client.Client) error) {
-	clientHooks = append(clientHooks, hook)
+	registerClientHookFor(clientHookSurfaceCLI, hook)
+}
+
+func registerClientHookFor(surface clientHookSurface, hook func(*client.Client) error) {
+	if hook == nil {
+		panic("cli: nil client hook")
+	}
+	if surface == 0 || surface&^clientHookSurfaceBoth != 0 {
+		panic("cli: invalid client hook surface")
+	}
+	clientHooks = append(clientHooks, clientHookRegistration{
+		surface: surface,
+		hook:    hook,
+	})
+}
+
+func applyClientHooks(surface clientHookSurface, c *client.Client) error {
+	for _, registration := range clientHooks {
+		if registration.surface&surface == 0 {
+			continue
+		}
+		if err := registration.hook(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ApplyMCPClientHooks applies hooks that explicitly target MCP clients.
+func ApplyMCPClientHooks(c *client.Client) error {
+	return applyClientHooks(clientHookSurfaceMCP, c)
 }
 
 // RootCmd returns the Cobra command tree without executing it. The MCP server
@@ -689,10 +732,8 @@ func (f *rootFlags) newClient() (*client.Client, error) {
 	if err := bindPlatformClient(c, f); err != nil {
 		return nil, err
 	}
-	for _, hook := range clientHooks {
-		if err := hook(c); err != nil {
-			return nil, err
-		}
+	if err := applyClientHooks(clientHookSurfaceCLI, c); err != nil {
+		return nil, err
 	}
 	return c, nil
 }

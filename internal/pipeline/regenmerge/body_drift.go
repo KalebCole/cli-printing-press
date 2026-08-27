@@ -75,6 +75,9 @@ func bodyCallsByFunc(filename string) map[string]map[string]struct{} {
 		if !ok || fn.Body == nil {
 			continue
 		}
+		if fn.Recv == nil && isGeneratedClientHookDecl(fn.Name.Name) {
+			continue
+		}
 		// Generated registration scaffolding evolves independently of a
 		// hand-authored extension. Strip it before comparing call targets so
 		// a singleton-to-additive migration is not mistaken for a body edit.

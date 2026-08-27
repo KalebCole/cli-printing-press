@@ -86,12 +86,18 @@ func canonicalDeclTexts(filename string) map[string]string {
 		var name string
 		switch decl := d.(type) {
 		case *ast.FuncDecl:
+			if decl.Recv == nil && isGeneratedClientHookDecl(decl.Name.Name) {
+				continue
+			}
 			name = canonicalFuncName(decl)
 			decl.Doc = nil
 			if decl.Body != nil {
 				decl.Body.List = stripAddCommandStmts(decl.Body.List)
 			}
 		case *ast.GenDecl:
+			if isGeneratedClientHookGenDecl(decl) {
+				continue
+			}
 			name = genDeclName(decl)
 			decl.Doc = nil
 			for _, spec := range decl.Specs {
@@ -120,6 +126,27 @@ func canonicalDeclTexts(filename string) map[string]string {
 		out[name] = text
 	}
 	return out
+}
+
+func isGeneratedClientHookGenDecl(decl *ast.GenDecl) bool {
+	found := false
+	for _, declSpec := range decl.Specs {
+		switch typedSpec := declSpec.(type) {
+		case *ast.TypeSpec:
+			found = true
+			if !isGeneratedClientHookDecl(typedSpec.Name.Name) {
+				return false
+			}
+		case *ast.ValueSpec:
+			for _, name := range typedSpec.Names {
+				found = true
+				if !isGeneratedClientHookDecl(name.Name) {
+					return false
+				}
+			}
+		}
+	}
+	return found
 }
 
 // canonicalRender returns the gofmt-canonical text for an AST node. Renders
@@ -196,10 +223,19 @@ func isNovelCommandsHookASTStmt(stmt ast.Stmt) bool {
 	return ok && isIdent(call.Fun, "hook")
 }
 
-// isClientHooksASTStmt recognizes the generated client-extension loop. It is
-// template evolution, not authored value drift; otherwise a force regen would
-// retain an older root that has no way to run a preserved package extension.
+// isClientHooksASTStmt recognizes generated client-extension execution. Both
+// the legacy loop and scoped helper call are template evolution, not authored
+// value drift.
 func isClientHooksASTStmt(stmt ast.Stmt) bool {
+	if ifStmt, ok := stmt.(*ast.IfStmt); ok && ifStmt.Init != nil && len(ifStmt.Body.List) == 1 {
+		assign, ok := ifStmt.Init.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !isIdent(assign.Lhs[0], "err") {
+			return false
+		}
+		call, ok := assign.Rhs[0].(*ast.CallExpr)
+		return ok && isIdent(call.Fun, "applyClientHooks")
+	}
+
 	forStmt, ok := stmt.(*ast.RangeStmt)
 	if !ok || !isIdent(forStmt.X, "clientHooks") || len(forStmt.Body.List) != 1 {
 		return false

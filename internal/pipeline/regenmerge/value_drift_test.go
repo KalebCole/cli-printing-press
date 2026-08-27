@@ -315,6 +315,11 @@ func TestClassifyTreatsGeneratedNovelCommandHookAsTemplateEvolution(t *testing.T
 package cli
 
 var novelCommands func(root *Cmd, flags *rootFlags)
+var clientHooks []func(*Client) error
+
+func registerClientHook(hook func(*Client) error) {
+	clientHooks = append(clientHooks, hook)
+}
 
 func newRootCmd(flags *rootFlags) *Cmd {
 	root := &Cmd{}
@@ -324,6 +329,11 @@ func newRootCmd(flags *rootFlags) *Cmd {
 
 func newClient() *Client {
 	c := &Client{}
+	for _, hook := range clientHooks {
+		if err := hook(c); err != nil {
+			return nil
+		}
+	}
 	return c
 }
 `
@@ -331,13 +341,49 @@ func newClient() *Client {
 package cli
 
 var novelCommandHooks []func(root *Cmd, flags *rootFlags)
-var clientHooks []func(*Client) error
+
+type clientHookSurface uint8
+
+const (
+	clientHookSurfaceCLI clientHookSurface = 1 << iota
+	clientHookSurfaceMCP
+	clientHookSurfaceBoth = clientHookSurfaceCLI | clientHookSurfaceMCP
+)
+
+type clientHookRegistration struct {
+	surface clientHookSurface
+	hook    func(*Client) error
+}
+
+var clientHooks []clientHookRegistration
 
 func registerNovelCommand(hook func(root *Cmd, flags *rootFlags)) {
 	novelCommandHooks = append(novelCommandHooks, hook)
 }
 
-func registerClientHook(hook func(*Client) error) { clientHooks = append(clientHooks, hook) }
+func registerClientHook(hook func(*Client) error) {
+	registerClientHookFor(clientHookSurfaceCLI, hook)
+}
+
+func registerClientHookFor(surface clientHookSurface, hook func(*Client) error) {
+	clientHooks = append(clientHooks, clientHookRegistration{surface: surface, hook: hook})
+}
+
+func applyClientHooks(surface clientHookSurface, c *Client) error {
+	for _, registration := range clientHooks {
+		if registration.surface&surface == 0 {
+			continue
+		}
+		if err := registration.hook(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ApplyMCPClientHooks(c *Client) error {
+	return applyClientHooks(clientHookSurfaceMCP, c)
+}
 
 func newRootCmd(flags *rootFlags) *Cmd {
 	root := &Cmd{}
@@ -347,8 +393,8 @@ func newRootCmd(flags *rootFlags) *Cmd {
 
 func newClient() *Client {
 	c := &Client{}
-	for _, hook := range clientHooks {
-		if err := hook(c); err != nil { return nil }
+	if err := applyClientHooks(clientHookSurfaceCLI, c); err != nil {
+		return nil
 	}
 	return c
 }
