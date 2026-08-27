@@ -455,6 +455,96 @@ func Load() {
 		assert.True(t, ok)
 	})
 
+	t.Run("platform profile still declares required endpoint template vars", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+		cli := CLIManifest{
+			APIName:              "shopify",
+			DisplayName:          "Shopify",
+			MCPBinary:            "shopify-pp-mcp",
+			AuthType:             "api_key",
+			AuthEnvVars:          []string{"PRINTING_PRESS_CLIENT_PROFILE"},
+			EndpointTemplateVars: []string{"shop"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "shopify-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{
+					"PRINTING_PRESS_CLIENT_PROFILE": "${user_config.printing_press_client_profile}",
+				}},
+			},
+			UserConfig: map[string]MCPBVar{
+				"printing_press_client_profile": {Type: "string", Title: "Client profile", Required: true},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("SHOPIFY_ACCESS_TOKEN")
+	_ = os.Getenv("SHOPIFY_SHOP")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		assert.Equal(t, "${user_config.printing_press_client_profile}", got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"])
+		assert.Equal(t, "${user_config.shopify_shop}", got.Server.MCPConfig.Env["SHOPIFY_SHOP"])
+		_, hasToken := got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"]
+		assert.False(t, hasToken, "platform-profile CLIs must not re-add credentials from config.go")
+		shop, ok := got.UserConfig["shopify_shop"]
+		require.True(t, ok, "required {shop} must be promoted when discovered next to the profile selector")
+		assert.Equal(t, "SHOPIFY_SHOP", shop.Title)
+		assert.True(t, shop.Required, "{shop} has no spec-level default")
+		assert.False(t, shop.Sensitive)
+		assert.Contains(t, shop.Description, "{shop}")
+		assert.NotContains(t, shop.Description, "credential refresh")
+	})
+
+	t.Run("platform profile does not promote undeclared shop-shaped names", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "platform"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "platform", "profile.go"), []byte("package platform\n"), 0o644))
+		cli := CLIManifest{
+			APIName:     "shopify",
+			DisplayName: "Shopify",
+			MCPBinary:   "shopify-pp-mcp",
+			AuthType:    "api_key",
+			AuthEnvVars: []string{"PRINTING_PRESS_CLIENT_PROFILE"},
+		}
+		writeMCPBManifest(t, dir, MCPBManifest{
+			Name: "shopify-pp-mcp",
+			Server: MCPBServer{
+				MCPConfig: MCPBLaunchSpec{Env: map[string]string{
+					"PRINTING_PRESS_CLIENT_PROFILE": "${user_config.printing_press_client_profile}",
+				}},
+			},
+			UserConfig: map[string]MCPBVar{
+				"printing_press_client_profile": {Type: "string", Title: "Client profile", Required: true},
+			},
+		})
+		writeConfigFile(t, dir, "config.go", `package config
+
+import "os"
+
+func Load() {
+	_ = os.Getenv("SHOPIFY_ACCESS_TOKEN")
+	_ = os.Getenv("SHOPIFY_SHOP")
+}
+`)
+
+		require.NoError(t, reconcileMCPBManifestFromClient(dir, cli))
+
+		got := readMCPBManifest(t, dir)
+		_, hasShop := got.Server.MCPConfig.Env["SHOPIFY_SHOP"]
+		assert.False(t, hasShop, "SHOPIFY_SHOP is not a suffix-classified knob; without EndpointTemplateVars it must stay off the profile installer")
+		_, hasToken := got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"]
+		assert.False(t, hasToken)
+	})
+
 	t.Run("manifest with nil env/userconfig maps gets populated", func(t *testing.T) {
 		dir := t.TempDir()
 		cli := CLIManifest{APIName: "x", MCPBinary: "x-pp-mcp", AuthType: "api_key"}
@@ -707,11 +797,10 @@ func writeConfigFile(t *testing.T, dir, name, content string) {
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, name), []byte(content), 0o644))
 }
 
-// TestWriteManifestForGenerate_IncludesGeneratedConfigBaseURL is the
-// generated-manifest proof: a real print's config.go always os.Getenv's
-// <API>_BASE_URL, and WriteManifestForGenerate must put that name in
-// MCPB user_config / mcp_config.env. A scanner-only fixture would not
-// catch a template/writer split that left generated config.go unread.
+// A scanner fixture can miss a split where config.go.tmpl emits
+// *_BASE_URL but the generate-time writer never reads that file. The
+// installer ships the printed manifest.json, so that file is the
+// contract this proof checks.
 func TestWriteManifestForGenerate_IncludesGeneratedConfigBaseURL(t *testing.T) {
 	apiSpec := &spec.APISpec{
 		Name:      "hudu",
@@ -770,6 +859,65 @@ func TestWriteManifestForGenerate_IncludesGeneratedConfigBaseURL(t *testing.T) {
 	assert.False(t, entry.Required)
 	assert.False(t, entry.Sensitive)
 	assert.Contains(t, entry.Description, "not a credential")
+}
+
+// A suffix allowlist cannot name {shop}: SHOPIFY_SHOP has no
+// _BASE_URL-style ending, but the printed CLI still reads it before
+// the first request. The installer prompt has to collect it without
+// also collecting the access token that rides the profile.
+func TestWriteManifestForGenerate_IncludesRequiredEndpointTemplateVar(t *testing.T) {
+	apiSpec := &spec.APISpec{
+		Name:                 "shopify",
+		Version:              "2026-04",
+		BaseURL:              "https://{shop}.myshopify.com/admin/api/2026-04",
+		EndpointTemplateVars: []string{"shop"},
+		Owner:                "test-owner",
+		OwnerName:            "Test Author",
+		Auth: spec.AuthConfig{
+			Type:    "api_key",
+			Header:  "X-Shopify-Access-Token",
+			EnvVars: []string{"SHOPIFY_ACCESS_TOKEN"},
+		},
+		Config: spec.ConfigSpec{
+			Format: "toml",
+			Path:   "~/.config/shopify-pp-cli/config.toml",
+		},
+		Resources: map[string]spec.Resource{
+			"orders": {
+				Description: "Orders",
+				Endpoints: map[string]spec.Endpoint{
+					"list": {Method: "GET", Path: "/orders", Description: "List orders"},
+				},
+			},
+		},
+	}
+
+	dir := filepath.Join(t.TempDir(), "shopify-pp-cli")
+	require.NoError(t, generator.New(apiSpec, dir).Generate())
+
+	configSrc, err := os.ReadFile(filepath.Join(dir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(configSrc), `os.Getenv("SHOPIFY_SHOP")`,
+		"generated config.go must remain the {shop} Getenv source this test is proving")
+
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "shopify",
+		OutputDir: dir,
+		Spec:      apiSpec,
+	}))
+
+	got := readMCPBManifest(t, dir)
+	assert.Equal(t, "${user_config.shopify_shop}", got.Server.MCPConfig.Env["SHOPIFY_SHOP"])
+	assert.Equal(t, "${user_config.printing_press_client_profile}", got.Server.MCPConfig.Env["PRINTING_PRESS_CLIENT_PROFILE"])
+	_, hasToken := got.Server.MCPConfig.Env["SHOPIFY_ACCESS_TOKEN"]
+	assert.False(t, hasToken, "platform-profile generate must not re-add SHOPIFY_ACCESS_TOKEN beside the profile selector")
+
+	entry, ok := got.UserConfig["shopify_shop"]
+	require.True(t, ok, "generated MCPB manifest must prompt for SHOPIFY_SHOP")
+	assert.Equal(t, "SHOPIFY_SHOP", entry.Title)
+	assert.True(t, entry.Required)
+	assert.False(t, entry.Sensitive)
+	assert.Contains(t, entry.Description, "{shop}")
 }
 
 // Sanity check that MCPBVar json round-trips the new Sensitive+Required flags.

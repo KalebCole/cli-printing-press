@@ -53,24 +53,14 @@ var nonCredentialEnvSuffixes = []string{
 	"_REGION",
 }
 
-// operatorEnvScanPackages are the generated packages whose os.Getenv
-// reads belong in the operator-facing MCPB declaration. Broader scans
-// (cmd/, internal/cli/) would pick up debug flags, test helpers, and
-// IDE shims that should not become user_config entries.
+// Only the generated HTTP client and config loader: those packages own
+// per-instance request settings. Broader trees (cmd/, internal/cli/) mix
+// debug flags, test helpers, and IDE shims into the same Getenv pattern.
 var operatorEnvScanPackages = []string{
 	filepath.Join("internal", "client"),
 	filepath.Join("internal", "config"),
 }
 
-// scanClientEnvReads parses every Go source file under internal/client/
-// and internal/config/ and returns the deduplicated, sorted set of env
-// var names read via os.Getenv("..."), excluding well-known platform-
-// convention vars, harness flags, and per-CLI config-file paths
-// (systemEnvVarDenylist and *_CONFIG).
-//
-// Parser errors on individual files are reported via stderr so an operator
-// running publish sees which file the scan skipped. The scan continues so
-// one malformed file does not block reconciliation of the remaining files.
 func scanClientEnvReads(dir string) ([]string, error) {
 	seen := make(map[string]struct{})
 	for _, rel := range operatorEnvScanPackages {
@@ -104,6 +94,9 @@ func scanPackageEnvReads(pkgDir string, seen map[string]struct{}) error {
 		path := filepath.Join(pkgDir, e.Name())
 		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 		if err != nil {
+			// One malformed file must not block the rest of the
+			// install-prompt inventory; stderr names the skip so
+			// publish operators can see it.
 			fmt.Fprintf(os.Stderr, "warning: skipping unparseable env-scan file %s: %v\n", path, err)
 			continue
 		}
@@ -145,20 +138,20 @@ func isDeniedDiscoveredEnvVar(name string) bool {
 	return strings.HasSuffix(name, configFileEnvSuffix)
 }
 
-// reconcileMCPBManifestFromClient extends the just-written manifest.json in
-// dir with user_config entries for any os.Getenv read in internal/client
-// or internal/config that the manifest does not already declare. cli is
-// the same in-memory CLIManifest the writer just emitted; passing it
-// through avoids a re-read of .printing-press.json (which may not be on
-// disk yet for callers that build the CLI manifest in memory).
+// The writer already declared spec-driven auth and endpoint-template
+// keys; this pass fills gaps the spec did not name (per-instance
+// BASE_URL, hand-written auth helpers) without re-reading
+// .printing-press.json, which may not be on disk yet.
 //
 // Safe by construction:
-//   - APIs with neither internal/client/ nor internal/config/ produce no changes.
+//   - APIs with neither scanned package produce no changes.
 //   - Env vars already declared in mcp_config.env are skipped.
 //   - Platform-profile CLIs keep PRINTING_PRESS_CLIENT_PROFILE as the
-//     credential surface; only non-secret per-instance reads (BASE_URL
-//     and similar) are promoted so config.go's credential Getenv calls
-//     are not re-added beside the profile selector.
+//     credential surface. Suffix-classified per-instance reads (BASE_URL
+//     and similar) and endpoint-template placeholders ({shop}) are still
+//     promoted: the profile selector does not fill a store hostname.
+//     Credential Getenv calls in config.go are not re-added beside the
+//     profile selector.
 //   - Goldens for spec-driven APIs without hand-written client code are
 //     untouched for credential names because those os.Getenv calls all
 //     resolve to names already in mcp_config.env (or are skipped under
@@ -192,7 +185,7 @@ func reconcileMCPBManifestFromClient(dir string, cli CLIManifest) error {
 		if _, declared := manifest.Server.MCPConfig.Env[name]; declared {
 			continue
 		}
-		if platformProfiles && !isNonCredentialDiscoveredEnvVar(name) {
+		if platformProfiles && !isPlatformProfileSafeDiscoveredEnvVar(cli, name) {
 			continue
 		}
 		missing = append(missing, name)
@@ -211,13 +204,18 @@ func reconcileMCPBManifestFromClient(dir string, cli CLIManifest) error {
 	required := authRequiresCredential(cli.AuthType) && !cli.AuthOptional
 	for _, name := range missing {
 		key := userConfigKey(name)
+		manifest.Server.MCPConfig.Env[name] = "${user_config." + key + "}"
+		if templateVar, ok := endpointTemplateVarForEnv(cli, name); ok {
+			_, entry := endpointTemplateUserConfigEntry(cli, templateVar)
+			manifest.UserConfig[key] = entry
+			continue
+		}
 		entryRequired := required
 		sensitive := true
 		if isNonCredentialDiscoveredEnvVar(name) {
 			entryRequired = false
 			sensitive = false
 		}
-		manifest.Server.MCPConfig.Env[name] = "${user_config." + key + "}"
 		manifest.UserConfig[key] = MCPBVar{
 			Type:        mcpbVarTypeString,
 			Title:       name,
@@ -272,4 +270,12 @@ func isNonCredentialDiscoveredEnvVar(name string) bool {
 		}
 	}
 	return false
+}
+
+// The profile selector covers credentials. Suffix-classified knobs and
+// endpoint-template placeholders are the remaining operator inputs the
+// installer must still collect; treating them as secrets would either
+// drop {shop} or prompt for HUDU_API_KEY beside the profile.
+func isPlatformProfileSafeDiscoveredEnvVar(cli CLIManifest, name string) bool {
+	return isNonCredentialDiscoveredEnvVar(name) || isEndpointTemplateEnvVar(cli, name)
 }
