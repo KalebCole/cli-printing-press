@@ -55,24 +55,26 @@ func oauthTokenSameOrigin(target, origin *url.URL) bool {
 	if !strings.EqualFold(target.Scheme, origin.Scheme) {
 		return false
 	}
-	return oauthTokenCanonicalHost(target) == oauthTokenCanonicalHost(origin)
+	// Hostname and port are compared separately so an IPv6 address plus
+	// non-default port cannot collide with a different IPv6 address whose
+	// last hextet looks like that port (host:port concatenation would).
+	if !strings.EqualFold(target.Hostname(), origin.Hostname()) {
+		return false
+	}
+	return oauthTokenCanonicalPort(target) == oauthTokenCanonicalPort(origin)
 }
 
-func oauthTokenCanonicalHost(u *url.URL) string {
-	host := strings.ToLower(u.Hostname())
+func oauthTokenCanonicalPort(u *url.URL) string {
 	port := u.Port()
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		if port == "" || port == "443" {
-			return host
+			return "443"
 		}
 	case "http":
 		if port == "" || port == "80" {
-			return host
+			return "80"
 		}
 	}
-	if port == "" {
-		return host
-	}
-	return host + ":" + port
+	return port
 }

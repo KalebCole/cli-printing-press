@@ -64,7 +64,7 @@ func TestOAuthTokenHTTPClientEmittedForClientCredentialsWithoutTokenURL(t *testi
 
 	helper := readGeneratedFile(t, outputDir, "internal", "cliutil", "oauth_token.go")
 	assert.Contains(t, helper, "func OAuthTokenHTTPClient")
-	assert.Contains(t, helper, "func oauthTokenCanonicalHost")
+	assert.Contains(t, helper, "func oauthTokenCanonicalPort")
 	client := readGeneratedFile(t, outputDir, "internal", "client", "client.go")
 	assert.Contains(t, client, "cliutil.OAuthTokenHTTPClient")
 }
@@ -92,7 +92,7 @@ func TestOAuthTokenExchangeSameOriginRedirectPolicy(t *testing.T) {
 	helper := readGeneratedFile(t, outputDir, "internal", "cliutil", "oauth_token.go")
 	assert.Contains(t, helper, "func OAuthTokenHTTPClient(base *http.Client) *http.Client")
 	assert.Contains(t, helper, "c.CheckRedirect = oauthTokenSameOriginRedirect")
-	assert.Contains(t, helper, "func oauthTokenCanonicalHost")
+	assert.Contains(t, helper, "func oauthTokenCanonicalPort")
 	assert.NotContains(t, helper, "CheckRedirect = nil")
 	assert.NotContains(t, helper, "clone := *base")
 

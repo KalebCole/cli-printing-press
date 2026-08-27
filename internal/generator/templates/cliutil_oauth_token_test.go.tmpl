@@ -188,6 +188,8 @@ func TestOAuthTokenSameOriginRedirectDefaultPorts(t *testing.T) {
 		{name: "http implicit and :80", from: "http://auth.example/oauth/token", to: "http://auth.example:80/oauth/token-real"},
 		{name: "http :80 and implicit", from: "http://auth.example:80/oauth/token", to: "http://auth.example/oauth/token-real"},
 		{name: "https ipv6 implicit and :443", from: "https://[::1]/oauth/token", to: "https://[::1]:443/oauth/token-real"},
+		{name: "https ipv6 non-default same port", from: "https://[2001:db8::1]:444/oauth/token", to: "https://[2001:db8::1]:444/oauth/token-real"},
+		{name: "https ipv6 host vs host:port suffix", from: "https://[2001:db8::1]:444/oauth/token", to: "https://[2001:db8::1:444]/oauth/token-real", wantErr: true},
 		{name: "https host case", from: "https://Auth.Example/oauth/token", to: "https://auth.example:443/oauth/token-real"},
 		{name: "https non-default port", from: "https://auth.example/oauth/token", to: "https://auth.example:444/oauth/token-real", wantErr: true},
 		{name: "https :443 vs :444", from: "https://auth.example:443/oauth/token", to: "https://auth.example:444/oauth/token-real", wantErr: true},
