@@ -50,6 +50,7 @@ func TestRequiresRoleEmitsEndpointGate(t *testing.T) {
 	require.Contains(t, mcpSrc, "c, platformSession, err := newMCPClientFromConfig(ctx, cfg)")
 	require.Contains(t, mcpSrc, "cli.PersonaAdmin")
 
+	requireGeneratedCompiles(t, outputDir)
 	runGoCommand(t, outputDir, "test", "./internal/cli", "./internal/mcp", "./internal/config")
 }
 
@@ -113,6 +114,7 @@ func TestRequiresRoleEmitsMCPOrchestrationGates(t *testing.T) {
 	require.Contains(t, intentsSrc, "c, platformSession, err := newMCPClientFromConfig(ctx, cfg)")
 	require.Contains(t, intentsSrc, "requiredRole: cli.PersonaAdmin")
 
+	requireGeneratedCompiles(t, outputDir)
 	runGoCommand(t, outputDir, "test", "./internal/mcp", "./internal/cli", "./internal/config")
 }
 

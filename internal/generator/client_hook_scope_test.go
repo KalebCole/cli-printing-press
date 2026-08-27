@@ -14,6 +14,7 @@ func TestGeneratedClientHooksSupportSharedScope(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "client-hook-scope-pp-cli")
 	require.NoError(t, New(minimalSpec("client-hook-scope"), outputDir).Generate())
 
+	requireGeneratedCompiles(t, outputDir)
 	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "^TestSharedClientHookRunsOnBothSurfaces$", "-count=1")
 }
 
@@ -84,5 +85,6 @@ func TestMCPClientHookFailurePropagates(t *testing.T) {
 		0o644,
 	))
 
+	requireGeneratedCompiles(t, outputDir)
 	runGoCommand(t, outputDir, "test", "./internal/mcp", "-run", "^TestMCPClientHookFailurePropagates$", "-count=1")
 }
