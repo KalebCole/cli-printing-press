@@ -7,18 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 const oauthTokenHTTPClientTimeout = 30 * time.Second
 
-// OAuthTokenHTTPClient returns a client for POSTing to an OAuth token
-// endpoint. Timeout and Transport are copied from base so proxy and TLS
-// settings survive, but CheckRedirect is never copied: a nil callback is
-// Go's default 10-hop policy, which follows cross-host 307/308 and replays
-// the original POST body (including client_secret). The replacement
-// callback allows same-origin hops only.
+// OAuthTokenHTTPClient isolates token-endpoint POSTs from the shared API
+// client's CheckRedirect. That policy allows cross-host hops after stripping
+// Authorization; Go still replays the original POST body on 307/308, so a
+// token request would leak client_secret. Timeout and Transport are copied
+// so proxy and TLS settings survive. CheckRedirect is never copied: a nil
+// callback is Go's default 10-hop policy. The replacement callback allows
+// same-origin hops only.
 func OAuthTokenHTTPClient(base *http.Client) *http.Client {
 	c := &http.Client{Timeout: oauthTokenHTTPClientTimeout}
 	if base != nil {
@@ -39,9 +41,38 @@ func oauthTokenSameOriginRedirect(req *http.Request, via []*http.Request) error 
 		return errors.New("oauth token exchange refused redirect")
 	}
 	origin := via[0].URL
-	if !strings.EqualFold(req.URL.Scheme, origin.Scheme) || !strings.EqualFold(req.URL.Host, origin.Host) {
+	if !oauthTokenSameOrigin(req.URL, origin) {
 		return fmt.Errorf("oauth token exchange refused cross-origin redirect from %s://%s to %s://%s",
 			origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
 	}
 	return nil
+}
+
+func oauthTokenSameOrigin(target, origin *url.URL) bool {
+	if target == nil || origin == nil {
+		return false
+	}
+	if !strings.EqualFold(target.Scheme, origin.Scheme) {
+		return false
+	}
+	return oauthTokenCanonicalHost(target) == oauthTokenCanonicalHost(origin)
+}
+
+func oauthTokenCanonicalHost(u *url.URL) string {
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		if port == "" || port == "443" {
+			return host
+		}
+	case "http":
+		if port == "" || port == "80" {
+			return host
+		}
+	}
+	if port == "" {
+		return host
+	}
+	return host + ":" + port
 }

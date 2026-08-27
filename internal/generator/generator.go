@@ -4024,12 +4024,18 @@ func (g *Generator) shouldEmitAuth() bool {
 		g.hasTrafficAnalysisHint("graphql_persisted_query")
 }
 
+// client.go emits mintClientCredentials — and a compile-time reference to
+// OAuthTokenHTTPClient — for every client_credentials grant, including
+// specs with an empty TokenURL. TokenURL and AuthorizationURL cover the
+// other call sites (refresh, auth-code exchange, device poll).
 func (g *Generator) hasOAuthTokenExchange() bool {
 	if g == nil || g.Spec == nil {
 		return false
 	}
 	auth := g.Spec.Auth
-	return strings.TrimSpace(auth.TokenURL) != "" || strings.TrimSpace(auth.AuthorizationURL) != ""
+	return strings.TrimSpace(auth.TokenURL) != "" ||
+		strings.TrimSpace(auth.AuthorizationURL) != "" ||
+		auth.EffectiveOAuth2Grant() == spec.OAuth2GrantClientCredentials
 }
 
 func (g *Generator) emitsTopLevelOAuthLogin() bool {

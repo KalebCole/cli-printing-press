@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -156,5 +157,56 @@ func TestOAuthTokenHTTPClientIgnoresPermissiveBasePolicy(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Fatalf("permissive base CheckRedirect leaked onto the token client: hits=%d", hits.Load())
+	}
+}
+
+func TestOAuthTokenSameOriginRedirectDefaultPorts(t *testing.T) {
+	t.Parallel()
+
+	mustURL := func(raw string) *url.URL {
+		t.Helper()
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse %q: %v", raw, err)
+		}
+		return u
+	}
+	redirect := func(from, to string) error {
+		via := &http.Request{URL: mustURL(from)}
+		req := &http.Request{URL: mustURL(to)}
+		return oauthTokenSameOriginRedirect(req, []*http.Request{via})
+	}
+
+	cases := []struct {
+		name    string
+		from    string
+		to      string
+		wantErr bool
+	}{
+		{name: "https implicit and :443", from: "https://auth.example/oauth/token", to: "https://auth.example:443/oauth/token-real"},
+		{name: "https :443 and implicit", from: "https://auth.example:443/oauth/token", to: "https://auth.example/oauth/token-real"},
+		{name: "http implicit and :80", from: "http://auth.example/oauth/token", to: "http://auth.example:80/oauth/token-real"},
+		{name: "http :80 and implicit", from: "http://auth.example:80/oauth/token", to: "http://auth.example/oauth/token-real"},
+		{name: "https ipv6 implicit and :443", from: "https://[::1]/oauth/token", to: "https://[::1]:443/oauth/token-real"},
+		{name: "https host case", from: "https://Auth.Example/oauth/token", to: "https://auth.example:443/oauth/token-real"},
+		{name: "https non-default port", from: "https://auth.example/oauth/token", to: "https://auth.example:444/oauth/token-real", wantErr: true},
+		{name: "https :443 vs :444", from: "https://auth.example:443/oauth/token", to: "https://auth.example:444/oauth/token-real", wantErr: true},
+		{name: "http vs https default ports", from: "http://auth.example/oauth/token", to: "https://auth.example:443/oauth/token-real", wantErr: true},
+		{name: "different hosts same default port", from: "https://auth.example/oauth/token", to: "https://evil.example:443/oauth/token-real", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := redirect(tc.from, tc.to)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("from %s to %s: want error", tc.from, tc.to)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("from %s to %s: %v", tc.from, tc.to, err)
+			}
+		})
 	}
 }

@@ -44,6 +44,31 @@ func TestOAuthTokenHTTPClientEmittedForAuthorizationURLOnly(t *testing.T) {
 	assert.Contains(t, auth, "cliutil.OAuthTokenHTTPClient")
 }
 
+func TestOAuthTokenHTTPClientEmittedForClientCredentialsWithoutTokenURL(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("cc-no-token-url")
+	apiSpec.Auth = spec.AuthConfig{
+		Type:        "oauth2",
+		Header:      "Authorization",
+		Format:      "Bearer {token}",
+		OAuth2Grant: spec.OAuth2GrantClientCredentials,
+		EnvVarSpecs: []spec.AuthEnvVar{
+			{Name: "CC_NO_TOKEN_URL_CLIENT_ID", Kind: spec.AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: false},
+			{Name: "CC_NO_TOKEN_URL_CLIENT_SECRET", Kind: spec.AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: true},
+		},
+	}
+	outputDir := filepath.Join(t.TempDir(), "cc-no-token-url-pp-cli")
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+	requireGeneratedCompiles(t, outputDir)
+
+	helper := readGeneratedFile(t, outputDir, "internal", "cliutil", "oauth_token.go")
+	assert.Contains(t, helper, "func OAuthTokenHTTPClient")
+	assert.Contains(t, helper, "func oauthTokenCanonicalHost")
+	client := readGeneratedFile(t, outputDir, "internal", "client", "client.go")
+	assert.Contains(t, client, "cliutil.OAuthTokenHTTPClient")
+}
+
 func TestOAuthTokenExchangeSameOriginRedirectPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -67,6 +92,7 @@ func TestOAuthTokenExchangeSameOriginRedirectPolicy(t *testing.T) {
 	helper := readGeneratedFile(t, outputDir, "internal", "cliutil", "oauth_token.go")
 	assert.Contains(t, helper, "func OAuthTokenHTTPClient(base *http.Client) *http.Client")
 	assert.Contains(t, helper, "c.CheckRedirect = oauthTokenSameOriginRedirect")
+	assert.Contains(t, helper, "func oauthTokenCanonicalHost")
 	assert.NotContains(t, helper, "CheckRedirect = nil")
 	assert.NotContains(t, helper, "clone := *base")
 
