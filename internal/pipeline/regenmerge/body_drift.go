@@ -70,12 +70,13 @@ func bodyCallsByFunc(filename string) map[string]map[string]struct{} {
 		return nil
 	}
 	out := make(map[string]map[string]struct{}, len(file.Decls))
+	generatedClientHookHost := isGeneratedClientHookHost(filename)
 	for _, d := range file.Decls {
 		fn, ok := d.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		if fn.Recv == nil && isGeneratedClientHookDecl(fn.Name.Name) {
+		if generatedClientHookHost && fn.Recv == nil && isGeneratedClientHookDecl(fn.Name.Name) {
 			continue
 		}
 		// Generated registration scaffolding evolves independently of a

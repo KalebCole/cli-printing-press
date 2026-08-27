@@ -82,11 +82,12 @@ func canonicalDeclTexts(filename string) map[string]string {
 	}
 
 	out := make(map[string]string, len(file.Decls))
+	generatedClientHookHost := isGeneratedClientHookHost(filename)
 	for _, d := range file.Decls {
 		var name string
 		switch decl := d.(type) {
 		case *ast.FuncDecl:
-			if decl.Recv == nil && isGeneratedClientHookDecl(decl.Name.Name) {
+			if generatedClientHookHost && decl.Recv == nil && isGeneratedClientHookDecl(decl.Name.Name) {
 				continue
 			}
 			name = canonicalFuncName(decl)
@@ -95,7 +96,7 @@ func canonicalDeclTexts(filename string) map[string]string {
 				decl.Body.List = stripAddCommandStmts(decl.Body.List)
 			}
 		case *ast.GenDecl:
-			if isGeneratedClientHookGenDecl(decl) {
+			if generatedClientHookHost && isGeneratedClientHookGenDecl(decl) {
 				continue
 			}
 			name = genDeclName(decl)

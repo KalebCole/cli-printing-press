@@ -55,10 +55,11 @@ func extractDecls(filename string) (declSet, error) {
 	}
 
 	decls := declSet{}
+	generatedClientHookHost := isGeneratedClientHookHost(filename)
 	for _, d := range file.Decls {
 		switch decl := d.(type) {
 		case *ast.FuncDecl:
-			if decl.Recv == nil && isGeneratedClientHookDecl(decl.Name.Name) {
+			if generatedClientHookHost && decl.Recv == nil && isGeneratedClientHookDecl(decl.Name.Name) {
 				// Client hook registration is generated scaffolding. Ignore it so
 				// a force regen can upgrade an older root while retaining a
 				// markerless package-local client extension.
@@ -69,7 +70,7 @@ func extractDecls(filename string) (declSet, error) {
 			for _, spec := range decl.Specs {
 				switch s := spec.(type) {
 				case *ast.TypeSpec:
-					if isGeneratedClientHookDecl(s.Name.Name) {
+					if generatedClientHookHost && isGeneratedClientHookDecl(s.Name.Name) {
 						continue
 					}
 					decls.add(s.Name.Name)
@@ -78,7 +79,7 @@ func extractDecls(filename string) (declSet, error) {
 						// The original singleton hook was generated scaffolding,
 						// not authored surface. Ignore it so a force regen can
 						// migrate older generated roots to the additive hook.
-						if n.Name == "novelCommands" || isGeneratedClientHookDecl(n.Name) {
+						if n.Name == "novelCommands" || generatedClientHookHost && isGeneratedClientHookDecl(n.Name) {
 							continue
 						}
 						decls.add(n.Name)
@@ -88,6 +89,11 @@ func extractDecls(filename string) (declSet, error) {
 		}
 	}
 	return decls, nil
+}
+
+func isGeneratedClientHookHost(filename string) bool {
+	path := filepath.ToSlash(filename)
+	return path == "internal/cli/root.go" || strings.HasSuffix(path, "/internal/cli/root.go")
 }
 
 func isGeneratedClientHookDecl(name string) bool {

@@ -191,3 +191,30 @@ func doStuff(x int) int { return x * 2 }
 	assert.Equal(t, VerdictTemplatedClean, verdicts["internal/cli/helpers.go"],
 		"identical bodies must stay TEMPLATED-CLEAN")
 }
+
+func TestBodyDriftChecksClientHookNamedFunctionOutsideGeneratedRoot(t *testing.T) {
+	t.Parallel()
+
+	pubCLI := `package mcp
+
+func ApplyMCPClientHooks() {
+	configureClient()
+}
+
+func configureClient() {}
+`
+	freshCLI := `package mcp
+
+func ApplyMCPClientHooks() {}
+
+func configureClient() {}
+`
+	pubDir, freshDir := buildSyntheticFixture(t,
+		map[string]string{"internal/mcp/hooks.go": pubCLI},
+		map[string]string{"internal/mcp/hooks.go": freshCLI})
+
+	report, err := Classify(pubDir, freshDir, Options{Force: true})
+	require.NoError(t, err)
+
+	assert.Equal(t, VerdictTemplatedBodyDrift, verdictMap(report)["internal/mcp/hooks.go"])
+}
